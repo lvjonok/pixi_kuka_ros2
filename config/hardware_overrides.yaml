@@ -1,0 +1,23 @@
+# Hardware-specific controller-manager overrides.
+#
+# enforce_command_limits stays disabled on hardware as well as in mock. The
+# Jazzy controller-manager limiter throws St19bad_optional_access on the first
+# update cycle, when a command interface optional is still empty, and the
+# controller-manager responds by deactivating the offending controller:
+#
+#   Caught exception of type : St19bad_optional_access while updating
+#   controller 'fri_position_passthrough_controller': bad optional access
+#   Deactivating controllers : [ fri_position_passthrough_controller ]
+#
+# Observed on the real cabinet on 2026-08-25, at the first FRI bringup, the
+# instant the session reached COMMANDING_ACTIVE. This is not a GenericSystem or
+# mock-only problem as previously assumed, so re-enabling it here defeated the
+# disable in controllers.yaml and cost us the position passthrough controller.
+#
+# Losing that controller on hardware is the dangerous case: it is what keeps the
+# FRI position setpoint pinned to the measured position while CRISP writes the
+# torque overlay. LBR-Stack's own safe_stop command guard remains authoritative
+# and is unaffected.
+/**/controller_manager:
+  ros__parameters:
+    enforce_command_limits: false

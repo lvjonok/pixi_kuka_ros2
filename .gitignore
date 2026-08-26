@@ -1,0 +1,23 @@
+.pixi/
+.ros/
+.ruff_cache/
+.idea/
+.vscode/
+.env
+.DS_Store
+__pycache__/
+*.py[cod]
+build/
+install/
+log/
+
+# Sources imported by scripts/import_sources.sh
+/external/
+/src/crisp_controllers/
+/src/fri/
+/src/lbr_fri_idl/
+/src/lbr_fri_ros2_stack/
+/src/lbr_iiwa14_r820_description/
+/src/lbr_iiwa7_r800_description/
+/src/lbr_med14_r820_description/
+/src/lbr_med7_r800_description/

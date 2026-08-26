@@ -1,0 +1,313 @@
+# Controller configuration for lbr-stack's default robot_name "lbr".
+#
+# The KUKA FRI torque command is a position command plus a torque overlay. CRISP
+# claims only the effort interfaces, so the position passthrough controller must
+# remain active while a CRISP controller is active. The zero-effort controller
+# is the safe counterpart used in atomic controller switches.
+/**/controller_manager:
+  ros__parameters:
+    update_rate: 500
+    # LBR-Stack's safe-stop command guard remains authoritative. The Jazzy
+    # controller-manager limiter currently throws on GenericSystem's empty
+    # first-cycle optional and is therefore disabled here.
+    enforce_command_limits: false
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    forward_position_controller:
+      type: position_controllers/JointGroupPositionController
+
+    estimated_wrench_interface:
+      type: lbr_ros2_control/EstimatedWrenchInterface
+
+    lbr_state_broadcaster:
+      type: lbr_ros2_control/LBRStateBroadcaster
+
+    force_torque_broadcaster:
+      type: force_torque_sensor_broadcaster/ForceTorqueSensorBroadcaster
+
+    fri_position_passthrough_controller:
+      type: pixi_kuka_ros2/FRIPositionPassthroughController
+
+    # Point-to-point moves, used to reach the home configuration. It claims the
+    # same position command interfaces as the passthrough controller, so exactly
+    # one of the two may be active. See scripts/kuka_crisp.py::move_to_home.
+    # The name is fixed: crisp_py's JointTrajectoryControllerClient hardcodes the
+    # action as "joint_trajectory_controller/follow_joint_trajectory".
+    joint_trajectory_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    zero_effort_controller:
+      type: pixi_kuka_ros2/ZeroEffortController
+
+    pose_broadcaster:
+      type: crisp_controllers/PoseBroadcaster
+
+    twist_broadcaster:
+      type: crisp_controllers/TwistBroadcaster
+
+    cartesian_impedance_controller:
+      type: crisp_controllers/CartesianController
+
+    joint_impedance_controller:
+      type: crisp_controllers/CartesianController
+
+/**/forward_position_controller:
+  ros__parameters:
+    joints:
+      - lbr_A1
+      - lbr_A2
+      - lbr_A3
+      - lbr_A4
+      - lbr_A5
+      - lbr_A6
+      - lbr_A7
+    interface_name: position
+
+/**/estimated_wrench_interface:
+  ros__parameters:
+    robot_name: lbr
+    wrench_estimator:
+      chain_root: lbr_link_0
+      chain_tip: lbr_link_ee
+      damping: 0.2
+      force_x_th: 2.0
+      force_y_th: 2.0
+      force_z_th: 2.0
+      torque_x_th: 0.5
+      torque_y_th: 0.5
+      torque_z_th: 0.5
+
+/**/lbr_state_broadcaster:
+  ros__parameters:
+    robot_name: lbr
+
+/**/force_torque_broadcaster:
+  ros__parameters:
+    frame_id: lbr_link_ee
+    sensor_name: estimated_wrench_interface
+
+/**/fri_position_passthrough_controller:
+  ros__parameters:
+    joints:
+      - lbr_A1
+      - lbr_A2
+      - lbr_A3
+      - lbr_A4
+      - lbr_A5
+      - lbr_A6
+      - lbr_A7
+
+/**/joint_trajectory_controller:
+  ros__parameters:
+    joints:
+      - lbr_A1
+      - lbr_A2
+      - lbr_A3
+      - lbr_A4
+      - lbr_A5
+      - lbr_A6
+      - lbr_A7
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    # The commanded position goes to FRI, which hands it to Sunrise's joint
+    # impedance controller at 200 Nm/rad. Tolerances are therefore on the
+    # impedance-tracked position, not on a stiff position servo, and a tight
+    # goal tolerance would abort moves that in fact arrived.
+    constraints:
+      stopped_velocity_tolerance: 0.02
+      goal_time: 5.0
+    allow_partial_joints_goal: false
+    open_loop_control: false
+
+/**/zero_effort_controller:
+  ros__parameters:
+    joints:
+      - lbr_A1
+      - lbr_A2
+      - lbr_A3
+      - lbr_A4
+      - lbr_A5
+      - lbr_A6
+      - lbr_A7
+
+/**/pose_broadcaster:
+  ros__parameters:
+    joints:
+      - lbr_A1
+      - lbr_A2
+      - lbr_A3
+      - lbr_A4
+      - lbr_A5
+      - lbr_A6
+      - lbr_A7
+    end_effector_frame: lbr_link_ee
+    base_frame: lbr_link_0
+
+/**/twist_broadcaster:
+  ros__parameters:
+    joints:
+      - lbr_A1
+      - lbr_A2
+      - lbr_A3
+      - lbr_A4
+      - lbr_A5
+      - lbr_A6
+      - lbr_A7
+    end_effector_frame: lbr_link_ee
+    base_frame: lbr_link_0
+
+/**/cartesian_impedance_controller:
+  ros__parameters:
+    joints:
+      - lbr_A1
+      - lbr_A2
+      - lbr_A3
+      - lbr_A4
+      - lbr_A5
+      - lbr_A6
+      - lbr_A7
+    end_effector_frame: lbr_link_ee
+    base_frame: lbr_link_0
+
+    filter:
+      target_pose: 0.1
+      q: 0.2
+      dq: 0.2
+      q_ref: 0.2
+      output_torque: 0.2
+
+    task:
+      k_pos_x: 500.0
+      k_pos_y: 500.0
+      k_pos_z: 500.0
+      k_rot_x: 20.0
+      k_rot_y: 20.0
+      k_rot_z: 20.0
+
+      d_pos_x: 50.0
+      d_pos_y: 50.0
+      d_pos_z: 50.0
+      d_rot_x: 13.4
+      d_rot_y: 13.4
+      d_rot_z: 13.4
+
+      error_clip:
+        x: 0.1
+        y: 0.1
+        z: 0.1
+        rx: 0.5
+        ry: 0.5
+        rz: 0.5
+
+    nullspace:
+      stiffness: 5.0
+      damping: 10.0
+      max_tau: 3.0
+
+    joint_limit_repulsion:
+      enabled: true
+      safe_range: 0.15
+      max_torque: 3.0
+
+    max_delta_tau: 2.0
+    limit_error: false
+    limit_torques: true
+    use_friction: false
+    # FRI torque commands are overlays on KUKA's joint-impedance controller.
+    # Do not duplicate the robot controller's model compensation here.
+    use_coriolis_compensation: false
+    use_gravity_compensation: false
+    use_local_jacobian: true
+
+/**/joint_impedance_controller:
+  ros__parameters:
+    joints:
+      - lbr_A1
+      - lbr_A2
+      - lbr_A3
+      - lbr_A4
+      - lbr_A5
+      - lbr_A6
+      - lbr_A7
+    end_effector_frame: lbr_link_ee
+    base_frame: lbr_link_0
+
+    # Matches the Cartesian controller rather than inheriting CRISP's 0.5
+    # defaults. alpha weights the PREVIOUS value, so 0.2 keeps 20% of it: light
+    # smoothing, ~1.2 ms time constant at 500 Hz. Lag is what costs phase
+    # margin here, so filter no more than necessary.
+    filter:
+      q: 0.2
+      dq: 0.2
+      q_ref: 0.2
+      target_pose: 0.1
+      output_torque: 0.2
+
+    # Zero task gains: this controller is pure joint-space impedance, so the
+    # Cartesian error and its clip play no part.
+    task:
+      k_pos_x: 0.0
+      k_pos_y: 0.0
+      k_pos_z: 0.0
+      k_rot_x: 0.0
+      k_rot_y: 0.0
+      k_rot_z: 0.0
+
+    # With projector_type "none" the projector is the identity, so this block
+    # is the whole controller: tau = k*w*(q_ref - q) + d*w*(dq_ref - dq), with
+    # the same weight vector scaling both.
+    #
+    # Per-joint stiffness is stiffness * weight: 20, 20, 15, 15, 8, 5, 3 Nm/rad.
+    #
+    # Damping is set explicitly. Left at -1, CRISP computes 2*sqrt(k_j), which
+    # assumes an inertia of 1 kg m^2 at every joint. The iiwa14's proximal
+    # joints carry roughly 4-5 kg m^2 and its distal ones under 0.5, so the
+    # auto value under-damps A1-A4 by more than a factor of two. Critical
+    # damping is 2*sqrt(k_j * I_j), which for A1 at 20 Nm/rad and ~5 kg m^2 is
+    # about 20 rather than the 8.9 the formula gives.
+    #
+    # damping * weight = 20, 20, 15, 15, 8, 5, 3 N m s/rad, so the proximal
+    # joints land near critical and the distal ones are deliberately
+    # overdamped. They carry little inertia and are where measurement noise is
+    # worst.
+    #
+    # Unlike the Cartesian case this is a renderable impedance: 20 Nm/rad is an
+    # order of magnitude softer than Sunrise's 200 Nm/rad joint impedance
+    # underneath, so the series compliance is not the binding constraint.
+    nullspace:
+      stiffness: 1.0
+      damping: 1.0
+      projector_type: none
+      max_tau: 20.0
+      weights:
+        lbr_A1.value: 20.0
+        lbr_A2.value: 20.0
+        lbr_A3.value: 15.0
+        lbr_A4.value: 15.0
+        lbr_A5.value: 8.0
+        lbr_A6.value: 5.0
+        lbr_A7.value: 3.0
+
+    joint_limit_repulsion:
+      enabled: true
+      safe_range: 0.15
+      max_torque: 3.0
+
+    # Per joint, per control cycle. At the 500 Hz update rate 2.0 is 1000 Nm/s.
+    # The old 0.2 was 100 Nm/s, and a rate limit that low delays a reversing
+    # damping torque by a large fraction of the oscillation period, which turns
+    # damping into a destabilising lag exactly when the error is large. That is
+    # what produced the overshoot-above-a-threshold behaviour in the Cartesian
+    # controller, and this controller had it five times worse.
+    max_delta_tau: 2.0
+    limit_error: false
+    limit_torques: true
+    use_friction: false
+    use_coriolis_compensation: false
+    use_gravity_compensation: false
+    use_local_jacobian: true

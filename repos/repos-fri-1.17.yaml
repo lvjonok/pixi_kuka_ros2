@@ -1,0 +1,31 @@
+# Local manifest for FRI 1.17, which lbr_fri_ros2_stack does not ship on jazzy.
+# Upstream provides repos-fri-{1.11,1.14,1.15,1.16,2.5,2.6,2.7}.yaml only, but
+# lbr-stack/fri carries an fri-1.17 branch with the matching client SDK.
+# Contents mirror upstream repos-fri-1.16.yaml with the fri branch bumped.
+repositories:
+  fri:
+    type: git
+    url: https://github.com/lbr-stack/fri
+    version: fri-1.17
+  lbr_fri_idl:
+    type: git
+    url: https://github.com/lbr-stack/lbr_fri_idl
+    version: fri-1
+
+  # robot descriptions (optionally only use yours)
+  lbr_iiwa7_r800_description:
+    type: git
+    url: https://github.com/lbr-stack/lbr_iiwa7_r800_description.git
+    version: v2.5.0
+  lbr_iiwa14_r820_description:
+    type: git
+    url: https://github.com/lbr-stack/lbr_iiwa14_r820_description.git
+    version: v2.5.0
+  lbr_med7_r800_description:
+    type: git
+    url: https://github.com/lbr-stack/lbr_med7_r800_description.git
+    version: v2.5.0
+  lbr_med14_r820_description:
+    type: git
+    url: https://github.com/lbr-stack/lbr_med14_r820_description.git
+    version: v2.5.0

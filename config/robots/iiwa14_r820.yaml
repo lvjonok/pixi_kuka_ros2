@@ -1,0 +1,25 @@
+# crisp_py client profile for this bringup.
+#
+# CRISP_CONFIG_PATH puts this directory ahead of crisp_py's own package config, so
+# this file shadows any robots/iiwa14_r820.yaml the library ships. Keep the two in
+# step: a stale copy here wins silently.
+#
+# Every key must be a real RobotConfig field. An unknown key reaches
+# make_robot_config as a keyword argument and raises TypeError.
+namespace: lbr
+
+robot_config:
+  robot_type: iiwa
+  base_frame: lbr_link_0
+  target_frame: lbr_link_ee
+  default_controller: cartesian_impedance_controller
+  cartesian_impedance_controller_name: cartesian_impedance_controller
+
+  # Names the controller the joint parameter client talks to, not the one homing uses.
+  # Homing drives the real JointTrajectoryController over the position command
+  # interfaces, and the switch for it has to hold zero_effort_controller active so the
+  # torque overlay is driven to zero rather than left at its last written value.
+  joint_trajectory_controller_name: joint_impedance_controller
+
+  publish_frequency: 50.0
+  time_to_home: 10.0

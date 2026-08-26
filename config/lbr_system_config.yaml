@@ -1,0 +1,27 @@
+# This file must match the FRI client SDK selected when running setup.
+# The lab cabinet runs Sunrise.OS 1.17.1, so the default is FRI 1.17.
+# Change both numbers for another supported SDK.
+fri_client_sdk:
+  major_version: 1
+  minor_version: 17
+
+# CRISP writes joint torque overlays. The smartPAD LBRServer must use TORQUE
+# client command mode and JOINT_IMPEDANCE_CONTROL.
+client_command_mode: torque
+port_id: 30200
+remote_host: INADDR_ANY
+rt_prio: 80
+
+# The position passthrough controller continuously mirrors measured positions.
+joint_position_tau: 0.004
+
+command_guard:
+  variant: safe_stop
+
+state_guard:
+  external_torque_safety_check: true
+  external_torque_limit: 2.0
+
+external_torque_tau: 0.01
+measured_torque_tau: 0.01
+open_loop: false

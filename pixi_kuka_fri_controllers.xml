@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<library path="pixi_kuka_fri_controllers">
+  <class
+    name="pixi_kuka_ros2/FRIPositionPassthroughController"
+    type="pixi_kuka_ros2::FRIPositionPassthroughController"
+    base_class_type="controller_interface::ControllerInterface">
+    <description>
+      Mirrors measured joint positions into the FRI position command interfaces while a separate controller supplies torque overlays.
+    </description>
+  </class>
+  <class
+    name="pixi_kuka_ros2/ZeroEffortController"
+    type="pixi_kuka_ros2::ZeroEffortController"
+    base_class_type="controller_interface::ControllerInterface">
+    <description>
+      Continuously writes zero torque and provides a safe controller to switch to and from CRISP atomically.
+    </description>
+  </class>
+</library>

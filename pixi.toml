@@ -1,0 +1,55 @@
+[workspace]
+authors = ["Lev Kozlov <kozlov.l.a10@gmail.com>"]
+name = "pixi_kuka_ros2"
+version = "0.1.0"
+channels = ["https://fast.prefix.dev/conda-forge"]
+platforms = ["linux-64"]
+
+[activation]
+scripts = ["scripts/set_ros_env.sh"]
+
+[dependencies]
+python = "*"
+compilers = "*"
+cmake = "*"
+pkg-config = "*"
+make = "*"
+ninja = "*"
+numpy = "<=2.3"
+vcstool = "*"
+
+[target.linux.dependencies]
+libgl-devel = "*"
+
+[environments]
+jazzy = { features = ["jazzy", "dev"] }
+
+[feature.jazzy]
+channels = ["https://prefix.dev/robostack-jazzy"]
+
+[feature.jazzy.dependencies]
+colcon-common-extensions = "*"
+pinocchio = ">=3.7.0,<4"
+ros-jazzy-desktop = "*"
+ros-jazzy-generate-parameter-library = "*"
+ros-jazzy-rmw-cyclonedds-cpp = "*"
+ros-jazzy-ros2-control = "*"
+ros-jazzy-ros2-controllers = "*"
+ros-jazzy-xacro = ">=2.0.13,<3"
+
+[feature.jazzy.tasks]
+sources = "bash scripts/import_sources.sh"
+build = { cmd = "colcon build --base-paths . src --packages-up-to pixi_kuka_ros2 --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -Wno-dev", depends-on = ["sources"] }
+setup = { depends-on = ["build"] }
+mock = "ros2 launch pixi_kuka_ros2 crisp_mock.launch.py"
+mock-loopback = "env CYCLONEDDS_URI=file://$PWD/config/cyclonedds_loopback.xml ros2 launch pixi_kuka_ros2 crisp_mock.launch.py"
+hardware = "ros2 launch pixi_kuka_ros2 crisp_hardware.launch.py"
+controllers = "ros2 control list_controllers -c /lbr/controller_manager"
+interfaces = "ros2 control list_hardware_interfaces -c /lbr/controller_manager"
+session = "env CYCLONEDDS_URI=file://$PWD/config/cyclonedds_loopback.xml python scripts/crisp_session.py"
+
+[feature.dev.pypi-dependencies]
+crisp-python = ">=3.0.0,<4"
+filelock = ">=3.20,<4"
+pytest = "*"
+ruff = "*"
