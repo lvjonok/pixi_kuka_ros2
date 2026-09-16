@@ -65,3 +65,9 @@ ruff = "*"
 iiwa_next = { path = "../../iiwa_next", editable = true }
 # Parquet writer for the same. Not otherwise used by this workspace.
 pyarrow = ">=15"
+# CPU torch, so `iiwa-next live` can run the trained estimator beside the arm and show the
+# residual while someone pushes it. A PyPI wheel, never conda: the wheels vendor their own CUDA
+# and MKL and depend only on numpy, which keeps torch out of the solver that also has to satisfy
+# robostack. CPU because one 50-step window through a 300k-parameter net takes well under a
+# millisecond, and the estimator runs at 100 Hz.
+torch = { version = ">=2.4", index = "https://download.pytorch.org/whl/cpu" }
