@@ -32,18 +32,23 @@ from __future__ import annotations
 
 import argparse
 import json
-import signal
+import pathlib
 import socket
+import subprocess
 import sys
 import time
 
 import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseStamped
+from rclpy._rclpy_pybind11 import RCLError
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from scipy.spatial.transform import Rotation
 from sensor_msgs.msg import JointState
+
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
 
 TARGET_TOPIC = "/lbr/target_pose"
 CURRENT_POSE_TOPIC = "/lbr/current_pose"
@@ -68,7 +73,22 @@ class Bridge(Node):
         self.last_packet_s: float | None = None
         self.refusals = 0
         self.published = 0
-        self.clamped_ticks = 0
+        self.packets = 0
+        self._idle_ticks = 0
+        # One counter per guard, not one shared counter. Lumping them together reports that
+        # "something was clamped" and leaves you unable to tell a hand moving faster than the
+        # speed limit from a wrist turning faster than the rotation limit from a target
+        # pressed against the workspace wall — three different problems with three different
+        # fixes, and the shared counter looks identical for all of them.
+        self.clamped_lin = 0
+        self.clamped_rot = 0
+        self.clamped_box = 0
+        self.clamped_err = 0
+        self.peak_speed_m_s = 0.0
+        self.peak_rot_deg_s = 0.0
+        self.engage_id: int | None = None
+        self._last_cmd_s: float | None = None
+        self._engaged_since: float | None = None
 
         self.pub = self.create_publisher(PoseStamped, TARGET_TOPIC, 1)
         self.create_subscription(
@@ -83,6 +103,20 @@ class Bridge(Node):
         self.sock.bind((args.bind, args.port))
         self.sock.setblocking(False)
         self.reply_to: tuple[str, int] | None = None
+
+        # CartesianController refuses EVERY command on a topic that has more than one
+        # publisher, and says so only in the controller_manager's log — from here it looks
+        # like a healthy bridge publishing into an arm that ignores it. Check once, loudly,
+        # at the point where the cause is still obvious.
+        time.sleep(0.5)  # let discovery settle before counting
+        others = self.count_publishers(TARGET_TOPIC) - 1
+        if others > 0:
+            self.get_logger().error(
+                f"{others} OTHER publisher(s) on {TARGET_TOPIC}. The CRISP controller "
+                f"refuses all commands while a command topic has more than one publisher, "
+                f"so teleop will do nothing. Usual cause: a crisp_py process (a session "
+                f"script, or an orphaned one) still publishing its own target."
+            )
 
         self.create_timer(1.0 / args.rate, self._tick)
         self.create_timer(1.0, self._report)
@@ -132,6 +166,9 @@ class Bridge(Node):
         packet = self._drain()
         now = time.monotonic()
         if packet is not None:
+            if self.packets == 0:
+                self.get_logger().info("first teleop packet received — the link is up")
+            self.packets += 1
             self.last_packet_s = now
             self._consume(packet)
             self._reply()
@@ -152,15 +189,28 @@ class Bridge(Node):
     def _consume(self, packet: dict) -> None:
         """Validate one teleop packet and update the commanded pose."""
         engaged = bool(packet.get("engaged", False))
+        engage_id = packet.get("engage_id")
         if not engaged:
             if self.engaged:
                 self.get_logger().info(f"clutch released — {HOLD}ing at the last target")
             self.engaged = False
             return
 
+        # A new engage is whatever the teleop SAYS is a new engage, not what this side infers
+        # from the boolean. Inferring it separately let a quick press-release-press be seen by
+        # one end and missed by the other; the two then anchored on different poses and the
+        # next packet arrived as a step of tens of millimetres in a single tick.
+        if engage_id is not None and engage_id != self.engage_id:
+            self.engage_id = engage_id
+            self.engaged = False  # forces the anchor check below to run for this engage
+
         if self.current_pose is None:
-            self.get_logger().warn_once(
-                f"no {CURRENT_POSE_TOPIC} yet; refusing to command an arm whose pose is unknown"
+            # `warn_once` is not an rclpy logger method; `once=True` is how rclpy spells it,
+            # and getting it wrong would have raised AttributeError inside the timer callback
+            # at exactly the moment the operator first engaged the clutch.
+            self.get_logger().warning(
+                f"no {CURRENT_POSE_TOPIC} yet; refusing to command an arm whose pose is unknown",
+                once=True,
             )
             return
 
@@ -183,17 +233,27 @@ class Bridge(Node):
             ang = float((rotation * self.current_pose[1].inv()).magnitude())
             if gap > self.args.anchor_tol_m or ang > np.radians(self.args.anchor_tol_deg):
                 self.refusals += 1
+                # Throttled: the operator holds the clutch, so this fires every tick at
+                # 200 Hz and an unthrottled version buries the heartbeat and the counter that
+                # say what is actually going on. The count is in the heartbeat line.
                 self.get_logger().error(
                     f"REFUSED engage: first target is {gap * 1e3:.0f} mm / "
                     f"{np.degrees(ang):.1f} deg from the measured pose (limits "
                     f"{self.args.anchor_tol_m * 1e3:.0f} mm / {self.args.anchor_tol_deg:.0f} deg). "
-                    f"The teleop anchored on a stale robot pose — restart the clutch."
+                    f"The teleop is anchored somewhere the arm is not — release the clutch, "
+                    f"and check that the teleop is anchoring on the measured pose.",
+                    throttle_duration_sec=2.0,
                 )
                 return
             self.engaged = True
             self.commanded = (self.current_pose[0].copy(), self.current_pose[1])
+            # Reset the rate estimator too: the step across an engage is a re-anchor, not
+            # motion, and letting it into the peak makes the measurement useless for choosing
+            # a limit — which is what reported 22 m/s from a hand that never moved that fast.
+            self._last_cmd_s = None
+            self._engaged_since = time.monotonic()
             self.get_logger().info(
-                f"clutch engaged at {np.round(self.commanded[0], 4).tolist()} "
+                f"clutch engaged #{self.engage_id} at {np.round(self.commanded[0], 4).tolist()} "
                 f"({gap * 1e3:.1f} mm / {np.degrees(ang):.2f} deg from measured)"
             )
             return
@@ -208,22 +268,68 @@ class Bridge(Node):
         step = position - prev_p
         dist = float(np.linalg.norm(step))
         max_step = self.args.max_speed_m_s / self.args.rate
+        # The requested speed is recorded whether or not it was clamped: the limit that is
+        # right is the one just above what the operator's hand actually does, and that number
+        # cannot be read off a counter of how often the old guess was exceeded.
+        #
+        # Measured against elapsed time, not the nominal tick: the teleop sends at its own
+        # loop rate, so dividing a whole packet's motion by this side's 5 ms tick reports a
+        # speed several times what the hand did.
+        now = time.monotonic()
+        dt = None if self._last_cmd_s is None else now - self._last_cmd_s
+        self._last_cmd_s = now
+        # Ignore the first moments after an engage. The teleop re-anchors its own commanded
+        # pose onto the measured one at that instant, so the commanded stream legitimately
+        # steps by however far it had drifted — real for the clamp to absorb, but not motion,
+        # and letting it into the peak is what reported 12 m/s from a hand doing 1.7.
+        settled = self._engaged_since is not None and (now - self._engaged_since) > 0.1
+        # Ignore intervals far shorter than the sender's own loop period. The teleop sends at
+        # roughly 60 Hz, so a 2 ms gap means two packets arrived in a burst after a stall,
+        # and dividing one packet's motion by that gap reports several m/s from a hand doing
+        # two. Bursts are real and the clamps handle them; they just are not a hand speed.
+        if dt is not None and dt > 0.008 and settled:
+            self.peak_speed_m_s = max(self.peak_speed_m_s, dist / dt)
         if dist > max_step:
             position = prev_p + step * (max_step / dist)
-            self.clamped_ticks += 1
+            self.clamped_lin += 1
 
         delta = rotation * prev_r.inv()
         ang = float(delta.magnitude())
         max_ang = np.radians(self.args.max_rot_deg_s) / self.args.rate
+        if dt is not None and dt > 0.008 and settled:
+            self.peak_rot_deg_s = max(self.peak_rot_deg_s, np.degrees(ang) / dt)
         if ang > max_ang:
             rotation = Rotation.from_rotvec(delta.as_rotvec() * (max_ang / ang)) * prev_r
-            self.clamped_ticks += 1
+            self.clamped_rot += 1
 
         lo = np.array(self.args.workspace_min, dtype=float)
         hi = np.array(self.args.workspace_max, dtype=float)
         clipped = np.clip(position, lo, hi)
         if not np.allclose(clipped, position):
-            self.clamped_ticks += 1
+            self.clamped_box += 1
+
+        # The guard that actually bounds force. The controller pulls with F = k*(x_d - x),
+        # so what the arm can do to the world depends on the ERROR between command and
+        # measurement, not on how fast the command moved: at 500 N/m a 100 mm gap is 50 N
+        # however slowly it opened. Clamping the error caps the force by construction
+        # (max_error_m * k), which lets the slew limits stay loose enough to teleoperate
+        # with. It also makes the arm stop following rather than accumulate a pull if the
+        # operator outruns it.
+        if self.current_pose is not None:
+            gap = clipped - self.current_pose[0]
+            dist = float(np.linalg.norm(gap))
+            if dist > self.args.max_error_m:
+                clipped = self.current_pose[0] + gap * (self.args.max_error_m / dist)
+                self.clamped_err += 1
+            delta_r = rotation * self.current_pose[1].inv()
+            ang_r = float(delta_r.magnitude())
+            max_ang_r = np.radians(self.args.max_error_deg)
+            if ang_r > max_ang_r:
+                rotation = (
+                    Rotation.from_rotvec(delta_r.as_rotvec() * (max_ang_r / ang_r))
+                    * self.current_pose[1]
+                )
+                self.clamped_err += 1
         return clipped, rotation
 
     # -- outputs --------------------------------------------------------------------
@@ -252,7 +358,15 @@ class Bridge(Node):
             "engaged": self.engaged,
             "published": self.published,
             "refusals": self.refusals,
-            "clamped": self.clamped_ticks,
+            "clamped": (
+                self.clamped_lin + self.clamped_rot + self.clamped_box + self.clamped_err
+            ),
+            "clamped_err": self.clamped_err,
+            "clamped_lin": self.clamped_lin,
+            "clamped_rot": self.clamped_rot,
+            "clamped_box": self.clamped_box,
+            "peak_speed_m_s": round(self.peak_speed_m_s, 3),
+            "peak_rot_deg_s": round(self.peak_rot_deg_s, 1),
             "dry_run": bool(self.args.dry_run),
         }
         try:
@@ -261,14 +375,129 @@ class Bridge(Node):
             pass
 
     def _report(self) -> None:
-        if not self.engaged:
+        if self.engaged:
+            assert self.commanded is not None and self.current_pose is not None
+            err = float(np.linalg.norm(self.commanded[0] - self.current_pose[0]))
+            # In a dry run the arm does not move, so this gap is how far the operator has
+            # carried the target from the anchor — not tracking lag. It only means lag once
+            # the arm is actually following.
+            gap = "gap to arm" if self.args.dry_run else "tracking error"
+            self.get_logger().info(
+                f"engaged · published {self.published} · {gap} {err * 1e3:.1f} mm · "
+                f"clamped lin/rot/box/err "
+                f"{self.clamped_lin}/{self.clamped_rot}/{self.clamped_box}/{self.clamped_err} · "
+                f"peak {self.peak_speed_m_s:.2f} m/s, {self.peak_rot_deg_s:.0f} deg/s · "
+                f"refusals {self.refusals}"
+            )
             return
-        assert self.commanded is not None and self.current_pose is not None
-        err = float(np.linalg.norm(self.commanded[0] - self.current_pose[0]))
-        self.get_logger().info(
-            f"engaged · published {self.published} · tracking error {err * 1e3:.1f} mm · "
-            f"clamped ticks {self.clamped_ticks} · refusals {self.refusals}"
-        )
+
+        # Idle heartbeat. Without it, "waiting for the operator to hold the clutch", "the
+        # teleop is not running", and "this process is wedged" all look the same: a silent
+        # terminal. Each of those needs a different fix, so each gets a different line.
+        self._idle_ticks += 1
+        if self._idle_ticks % self.args.heartbeat_s:
+            return
+        pose = "yes" if self.current_pose is not None else f"NO — is {CURRENT_POSE_TOPIC} up?"
+        if self.packets == 0:
+            self.get_logger().info(
+                f"waiting · teleop packets: none yet on udp://{self.args.bind}:{self.args.port} "
+                f"· robot pose: {pose}"
+            )
+        else:
+            since = "" if self.last_packet_s is None else (
+                f" ({time.monotonic() - self.last_packet_s:.1f} s ago)"
+            )
+            self.get_logger().info(
+                f"waiting · {self.packets} packets received{since}, clutch released · "
+                f"robot pose: {pose} · refusals {self.refusals}"
+            )
+
+
+def prepare_arm(controller: str, speed_deg_s: float, assume_yes: bool) -> None:
+    """Home the arm and hand control to a CRISP controller, in the order this cell requires.
+
+    The order is not cosmetic. `move_to_home` drives the POSITION interfaces through
+    `joint_trajectory_controller`, and a CRISP torque overlay left active during that move
+    would be fighting it — so any torque controller is put back to `zero_effort_controller`
+    first, the arm is homed, and only then is the teleop controller raised.
+
+    Uses this workspace's own `safe_switch` and `move_to_home` rather than raw controller
+    calls: the former keeps the FRI passthrough and wrench interface active and refuses to
+    switch without the passthrough, and the latter keeps the zero overlay owned throughout
+    and swaps back even if the goal aborts. crisp_py's Robot.home() must not be used here —
+    it deactivates the zero-effort controller and sends BEST_EFFORT.
+
+    Raises:
+        SystemExit: if the operator declines, or the arm is not ready.
+    """
+    from kuka_crisp import (
+        HOME_DEGREES,
+        TORQUE_CONTROLLERS,
+        active_controllers,
+        make_kuka_robot,
+        move_to_home,
+        safe_switch,
+    )
+
+    print(f"\n  This MOVES THE ARM: home to {HOME_DEGREES} deg at {speed_deg_s:.0f} deg/s,")
+    print(f"  then hands control to {controller}.")
+    print("  Workspace clear? Hand near the E-stop?")
+    if not assume_yes:
+        try:
+            if input("  Press Enter to continue, Ctrl-C to abort: ").strip().lower() in {"n", "no"}:
+                raise SystemExit("aborted")
+        except (EOFError, KeyboardInterrupt):
+            raise SystemExit("\naborted") from None
+
+    robot = make_kuka_robot()
+    robot.wait_until_ready(timeout=15.0)
+
+    active = active_controllers(robot)
+    for torque_controller in TORQUE_CONTROLLERS:
+        if torque_controller in active:
+            print(f"  {torque_controller} is active — returning to zero_effort_controller "
+                  f"before a position move")
+            safe_switch(robot, "zero_effort_controller")
+            break
+
+    print("  homing ...")
+    move_to_home(robot, speed_deg_s=speed_deg_s)
+
+    # Move crisp_py's OWN target onto the arm before raising the controller.
+    #
+    # The Robot object latches `_target_pose` to the current pose the first time one arrives
+    # — which is at construction, BEFORE the homing move — and a 50 Hz timer republishes it
+    # to target_pose for as long as the object lives (robot.py:108, :165-170, :357-358). So
+    # it broadcasts the PRE-HOME pose continuously. Publishing the post-home pose from a
+    # separate node does nothing: crisp_py overwrites it within 20 ms, the controller reads
+    # that stale target on activation, and the arm drives back to wherever teleop last left
+    # it at full stiffness. Measured on this bench: 66 mm back, after a correct home.
+    #
+    # Setting the target here means the stream the controller is already receiving carries
+    # the pose the arm is at, so activation is a no-op whichever message it consumes.
+    # BOTH targets, not just the pose. crisp_py publishes a joint target on its own 50 Hz
+    # timer as well (robot.py:178-181), latched the same way, and under the Cartesian
+    # controller that feeds q_ref — the nullspace reference. Parking only the pose leaves the
+    # nullspace pulling the arm back toward the configuration it held before homing, which
+    # reads as "it went back to the old pose" even though the Cartesian target is correct.
+    pose = robot.end_effector_pose
+    joints = robot.joint_values
+    print(f"  parking crisp_py's targets at the measured pose "
+          f"{np.round(pose.position, 4).tolist()} and joints "
+          f"{np.round(np.degrees(joints), 1).tolist()} deg ...")
+    robot.set_target(pose=pose)
+    robot.set_target_joint(joints)
+    time.sleep(0.3)  # several of crisp_py's own 50 Hz publications
+
+    print(f"  raising {controller} ...")
+    safe_switch(robot, controller)
+    time.sleep(0.3)
+
+    print(f"  ready — {controller} holds the arm where it stands; the clutch takes it from "
+          f"there\n")
+    # Tear the crisp_py robot down before the bridge starts: left alive, its executor thread
+    # keeps spinning underneath. This takes rclpy down with it, which main() re-inits.
+    robot.shutdown()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -280,33 +509,95 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-frame", default="lbr_link_0")
     parser.add_argument("--dry-run", action="store_true", help="validate and log, publish nothing")
     parser.add_argument("--watchdog-ms", type=float, default=100.0)
+    parser.add_argument("--heartbeat-s", type=int, default=5, help="idle status line period")
+    # Off by default. A script that moves the arm the moment it launches is the kind of thing
+    # that surprises somebody standing next to it, so moving is something you ask for.
+    parser.add_argument(
+        "--home",
+        action="store_true",
+        help="before bridging: home the arm and raise the teleop controller (MOVES THE ARM)",
+    )
+    parser.add_argument("--home-speed-deg-s", type=float, default=10.0)
+    parser.add_argument(
+        "--controller",
+        default="cartesian_impedance_controller",
+        help="the controller --home hands the arm to",
+    )
+    parser.add_argument("--yes", action="store_true", help="skip the --home confirmation")
+    # Internal: --home re-execs this script with this flag to do the preparation in a child
+    # process. See the comment at the call site for why it cannot share a process.
+    parser.add_argument("--prepare-only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--anchor-tol-m", type=float, default=0.005)
     parser.add_argument("--anchor-tol-deg", type=float, default=3.0)
-    # Deliberately slow. These are first-motion values for a cabinet on which no CRISP
-    # torque controller has ever been active; raise them once the arm has been watched.
-    parser.add_argument("--max-speed-m-s", type=float, default=0.05)
-    parser.add_argument("--max-rot-deg-s", type=float, default=20.0)
+    # Spike guards, not the force bound. Loose enough not to fight a hand (measured peak
+    # around 2 m/s on this bench), tight enough that one bad packet cannot become a lunge.
+    parser.add_argument("--max-speed-m-s", type=float, default=1.0)
+    parser.add_argument("--max-rot-deg-s", type=float, default=360.0)
+    # The force bound, and the one to think about: F_max = max_error_m * task stiffness.
+    # At the configured 500 N/m, 0.05 m is 25 N; 20 Nm/rad and 15 deg is 5.2 Nm.
+    parser.add_argument("--max-error-m", type=float, default=0.05)
+    parser.add_argument("--max-error-deg", type=float, default=15.0)
     # A box around the home pose (ee at 0.596, 0.0, 0.494 in lbr_link_0), not the reachable
     # workspace: the point is to bound a first session, not to express the arm's limits.
     parser.add_argument("--workspace-min", type=float, nargs=3, default=[0.35, -0.35, 0.25])
     parser.add_argument("--workspace-max", type=float, nargs=3, default=[0.80, 0.35, 0.75])
     args = parser.parse_args(argv)
 
+    if args.prepare_only:
+        rclpy.init()
+        prepare_arm(args.controller, args.home_speed_deg_s, args.yes)
+        return 0
+
+    if args.home:
+        if args.dry_run:
+            # Refusing rather than quietly skipping: --dry-run means "command nothing", and
+            # homing is a command. Silently honouring one half of the pair would move an arm
+            # somebody believed was safe to leave alone.
+            raise SystemExit("--home moves the arm and --dry-run says not to; pick one")
+        # In a CHILD PROCESS, not here. crisp_py's Robot publishes to target_pose, and its
+        # shutdown races with its own executor thread, leaving that publisher in the graph.
+        # CartesianController refuses every command while a topic has more than one
+        # publisher ("SAFETY WARNING: Multiple command sources detected") — so an orphaned
+        # crisp_py publisher makes this bridge the second one and silently disables teleop
+        # entirely. A child process takes its DDS entities to the grave with it.
+        child = subprocess.run(
+            [sys.executable, str(pathlib.Path(__file__).resolve()), "--prepare-only",
+             "--controller", args.controller,
+             "--home-speed-deg-s", str(args.home_speed_deg_s)]
+            + (["--yes"] if args.yes else []),
+            check=False,
+        )
+        if child.returncode != 0:
+            return child.returncode
+
     rclpy.init()
     node = Bridge(args)
-
-    def _stop(_sig: int, _frame: object) -> None:
-        node.get_logger().info(f"interrupted — stopping publication, arm {HOLD}s last target")
-        raise KeyboardInterrupt
-
-    signal.signal(signal.SIGINT, _stop)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
+    except RCLError:
+        # A SIGTERM lands between the context being invalidated and spin noticing, and spin
+        # then fails to build its wait set. Same clean stop, different exception.
+        pass
+    except ExternalShutdownException:
+        # rclpy installs its own signal handling, so Ctrl-C shuts the context down out from
+        # under spin and this is the normal exit path, not a fault. Left uncaught it prints a
+        # traceback on every clean stop, which trains the operator to ignore tracebacks.
+        pass
     finally:
+        # Plain stderr, not the node logger: by this point the context can already be
+        # invalid, and rosout then fails to publish and prints its own error over the top of
+        # the one line the operator actually needs to read on the way out.
+        print(
+            f"stopping publication — the arm {HOLD}s its last commanded pose under impedance",
+            file=sys.stderr,
+        )
         node.destroy_node()
-        rclpy.shutdown()
+        # Already shut down when we got here via ExternalShutdownException; calling it again
+        # raises RCLError from the C layer.
+        if rclpy.ok():
+            rclpy.shutdown()
     return 0
 
 
