@@ -1,7 +1,7 @@
 From fd64d0a13c860e8244af2d87346dca523d23816e Mon Sep 17 00:00:00 2001
 From: Lev Kozlov <kozlov.l.a10@gmail.com>
 Date: Wed, 16 Sep 2026 13:35:48 +0900
-Subject: [PATCH] feat: expose every term of the control law through
+Subject: [PATCH 1/2] feat: expose every term of the control law through
  introspection
 
 The controller creates no publishers, so the only way to read what it is
@@ -93,6 +93,123 @@ index f1d8bd8..91ecf2a 100644
    } else {
      RCLCPP_INFO(get_node()->get_logger(), "ROS2 Control Introspection is disabled.");
    }
+-- 
+2.43.0
+
+
+From 006d34a06c3fe4b7a71a9c86920d227ddb951918 Mon Sep 17 00:00:00 2001
+From: Lev Kozlov <kozlov.l.a10@gmail.com>
+Date: Wed, 16 Sep 2026 16:53:03 +0900
+Subject: [PATCH 2/2] fix: introspection pointers that aimed at freed memory
+
+tau_desired and tau_joint_limits were registered as &tau_d[i] and
+&tau_joint_limits[i] at configure time. Both vectors are assigned from
+functions returning VectorXd BY VALUE -- saturateTorqueRate,
+exponential_moving_average, get_joint_limit_torque -- and Eigen move-assigns
+those: the vector takes the temporary's buffer and frees its own. Every
+registered pointer then addressed freed memory for the rest of the run.
+
+Measured on the iiwa14 cell: tau_desired published exactly 0.0 on all seven
+joints while the arm was visibly tracking a teleoperated target, and
+tau_joint_limits published 1.5e-313, 6.9e-310 and 1.1e+243 -- uninitialised
+bytes, republished at 500 Hz as though they were torques. A dataset recorded
+against those channels would have carried them as fact.
+
+tau_task and tau_nullspace were always correct: they are assigned from Eigen
+expression templates, which evaluate into the existing buffer and leave the
+address alone. That is also why the fault was invisible in the obvious place --
+half the decomposition was right.
+
+The fix mirrors both quantities into std::array members written element-wise
+after the command is computed, so the addresses cannot move. Element-wise
+because an Eigen assignment is exactly what caused this.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+---
+ .../cartesian_controller.hpp                  | 13 ++++++++++
+ src/cartesian_controller.cpp                  | 24 +++++++++++++++++--
+ 2 files changed, 35 insertions(+), 2 deletions(-)
+
+diff --git a/include/crisp_controllers/cartesian_controller.hpp b/include/crisp_controllers/cartesian_controller.hpp
+index 32df937..71aafb9 100644
+--- a/include/crisp_controllers/cartesian_controller.hpp
++++ b/include/crisp_controllers/cartesian_controller.hpp
+@@ -5,6 +5,7 @@
+  * @brief Cartesian controller implementation for robot manipulation (supports impedance and OSC)
+  */
+ 
++#include <array>
+ #include <memory>
+ #include <string>
+ #include <unordered_set>
+@@ -274,6 +275,18 @@ private:
+   /** @brief Final desired torque command */
+   Eigen::VectorXd tau_d;
+ 
++  /** @brief Stable copies of tau_d and tau_joint_limits, for introspection only.
++   *
++   * Both of those are assigned from functions returning VectorXd BY VALUE, so Eigen
++   * move-assigns them and their storage address changes on every tick. An introspection
++   * pointer taken once at configure then reads freed memory for the rest of the run —
++   * measured on this cell as tau_desired reporting exactly 0.0 on every joint while the arm
++   * was visibly moving, and tau_joint_limits reporting 1.5e-313 and 1.1e+243. These are
++   * plain arrays written element-wise, so their addresses never move.
++   */
++  std::array<double, 7> tau_desired_introspect_{};
++  std::array<double, 7> tau_joint_limits_introspect_{};
++
+   /** @brief Inverse of the manipulator joint mass projected in Cartesian space (6x6) */
+   Eigen::Matrix<double, 6, 6> Mx_inv = Eigen::Matrix<double, 6, 6>::Zero();
+   /** @brief the manipulator joint mass projected in Cartesian space (6x6) */
+diff --git a/src/cartesian_controller.cpp b/src/cartesian_controller.cpp
+index 91ecf2a..56062e7 100644
+--- a/src/cartesian_controller.cpp
++++ b/src/cartesian_controller.cpp
+@@ -216,6 +216,25 @@ CartesianController::update(const rclcpp::Time & time, const rclcpp::Duration &
+   }
+   tau_d = exponential_moving_average(tau_d, tau_previous, params_.filter.output_torque);
+ 
++  // Introspection mirrors, copied element-wise from the values actually written to the
++  // command interfaces.
++  //
++  // They exist because `tau_d` and `tau_joint_limits` are assigned from functions returning
++  // VectorXd BY VALUE (saturateTorqueRate, exponential_moving_average, get_joint_limit_torque),
++  // which Eigen move-assigns: the vector swaps to the temporary's buffer and frees its own.
++  // An introspection pointer registered once at configure then aims at freed memory for the
++  // rest of the run. Recorded on this cell: tau_desired read exactly 0.0 on every joint while
++  // the arm was visibly moving, and tau_joint_limits read 1.5e-313 and 1.1e+243 — stale and
++  // uninitialised memory, published at 500 Hz as if they were torques.
++  //
++  // tau_task and tau_nullspace are assigned from expression templates, which evaluate in
++  // place and keep their buffer, which is why those two channels were correct throughout.
++  // Element-wise copies here cannot move, so these pointers stay valid by construction.
++  for (int i = 0; i < tau_d.size(); ++i) {
++    tau_desired_introspect_[i] = tau_d[i];
++    tau_joint_limits_introspect_[i] = tau_joint_limits[i];
++  }
++
+   if (!params_.stop_commands) {
+     for (size_t i = 0; i < params_.joints.size(); ++i) {
+ #if ROS2_VERSION_ABOVE_HUMBLE
+@@ -477,7 +496,8 @@ CartesianController::on_configure(const rclcpp_lifecycle::State & /*previous_sta
+     this->enable_introspection(true);
+     for (int i = 0; i < tau_task.size(); ++i) {
+       REGISTER_ROS2_CONTROL_INTROSPECTION("tau_task_" + std::to_string(i), &tau_task[i]);
+-      REGISTER_ROS2_CONTROL_INTROSPECTION("tau_desired_" + std::to_string(i), &tau_d[i]);
++      REGISTER_ROS2_CONTROL_INTROSPECTION(
++        "tau_desired_" + std::to_string(i), &tau_desired_introspect_[i]);
+     }
+     for (int i = 0; i < error.size(); ++i) {
+       REGISTER_ROS2_CONTROL_INTROSPECTION("error_" + std::to_string(i), &error[i]);
+@@ -520,7 +540,7 @@ CartesianController::on_configure(const rclcpp_lifecycle::State & /*previous_sta
+       REGISTER_ROS2_CONTROL_INTROSPECTION("tau_nullspace_" + std::to_string(i), &tau_nullspace[i]);
+       REGISTER_ROS2_CONTROL_INTROSPECTION("tau_secondary_" + std::to_string(i), &tau_secondary[i]);
+       REGISTER_ROS2_CONTROL_INTROSPECTION(
+-        "tau_joint_limits_" + std::to_string(i), &tau_joint_limits[i]);
++        "tau_joint_limits_" + std::to_string(i), &tau_joint_limits_introspect_[i]);
+       REGISTER_ROS2_CONTROL_INTROSPECTION("tau_wrench_" + std::to_string(i), &tau_wrench[i]);
+       REGISTER_ROS2_CONTROL_INTROSPECTION("tau_friction_" + std::to_string(i), &tau_friction[i]);
+       REGISTER_ROS2_CONTROL_INTROSPECTION("tau_coriolis_" + std::to_string(i), &tau_coriolis[i]);
 -- 
 2.43.0
 

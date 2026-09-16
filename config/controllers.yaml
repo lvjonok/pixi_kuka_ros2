@@ -181,20 +181,52 @@
       q_ref: 0.2
       output_torque: 0.2
 
+    # Teleoperation gains, 16 Sep 2026. Raised from 500/20 because the arm lagged the
+    # operator's hand, and that sluggishness has a published number attached: Takagi et al.
+    # (arXiv 2605.07037) ran a human-in-the-loop stiffness sweep on two 7-DOF Frankas and
+    # found error rising sharply below 400 N/m, with degradation "evident for compliance
+    # values smaller than 600 N/m". 500 sat below that knee.
+    #
+    # 900/60 is also exactly where crisp's own variable_max_stiffness clamps
+    # (cartesian_controller.yaml:333,339), silently and with only a throttled warning — so
+    # these are the reachable ceiling, not a preference.
+    #
+    # Real-hardware precedent on this arm class: idra-lab/kuka_lbr_control runs 1000/30 on a
+    # real iiwa over FRI torque; arXiv 2509.19696 teleoperates an iiwa from hand tracking at
+    # 800 N/m / 150 Nm/rad; matthias-mayr reports up to 1000 N/m "very stable" on real iiwas.
     task:
-      k_pos_x: 500.0
-      k_pos_y: 500.0
-      k_pos_z: 500.0
-      k_rot_x: 20.0
-      k_rot_y: 20.0
-      k_rot_z: 20.0
+      k_pos_x: 900.0
+      k_pos_y: 900.0
+      k_pos_z: 900.0
+      k_rot_x: 60.0
+      k_rot_y: 60.0
+      k_rot_z: 60.0
 
-      d_pos_x: 30.0
-      d_pos_y: 30.0
-      d_pos_z: 30.0
-      d_rot_x: 13.4
-      d_rot_y: 13.4
-      d_rot_z: 13.4
+      # NOT the 2*sqrt(k) convention, and deliberately below what a free-oscillation
+      # analysis alone would ask for, because two measurements pull opposite ways.
+      #
+      # Identified Franka end-effector dynamics (4.21 kg apparent inertia, 10.73 Ns/m
+      # viscous) put zeta=1 at K=1000 near B=131, where the convention gives 63 — so
+      # 2*sqrt(k) under-damps by about 2x, and the failure mode is a ~2 Hz resonance that
+      # feels bouncy rather than instability. The iiwa14 is heavier, so the factor is worse.
+      #
+      # Against that: crisp damps against MEASURED end-effector velocity with the target
+      # velocity implicitly zero (cartesian_controller.cpp:172-174), so every Ns/m here
+      # fights the operator's hand directly. van den Brandt et al. (arXiv 2603.25418) hit
+      # exactly this on a Quest-driven Franka teleop and fixed it with velocity feedforward
+      # rather than with stiffness.
+      #
+      # 70 is the compromise. If it feels bouncy, raise toward 110; if it feels heavy, the
+      # real fix is feedforward in the controller, not a smaller number here.
+      d_pos_x: 70.0
+      d_pos_y: 70.0
+      d_pos_z: 70.0
+      # 2*sqrt(60) = 15.5. The previous 13.4 was 2*sqrt(45) — critical for a k_rot of 45,
+      # inherited from a Panda profile, which left this bench at zeta 1.5 against its actual
+      # k_rot of 20: 50% overdamped, and a direct cause of laggy orientation.
+      d_rot_x: 15.5
+      d_rot_y: 15.5
+      d_rot_z: 15.5
 
       error_clip:
         x: 0.1
@@ -206,7 +238,9 @@
 
     nullspace:
       stiffness: 5.0
-      damping: 10.0
+      # 2*sqrt(5) = 4.47. The previous 10.0 was zeta 2.24 — the elbow dragged through
+      # molasses on every motion, for no stated reason.
+      damping: 4.5
       max_tau: 3.0
 
     joint_limit_repulsion:

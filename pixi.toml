@@ -53,3 +53,15 @@ crisp-python = ">=3.0.0,<4"
 filelock = ">=3.20,<4"
 pytest = "*"
 ruff = "*"
+# The dataset recorder for the external-torque experiment. It lives in its own repository
+# because it is an experiment, not part of the cell — but it has to run HERE: this is the
+# only environment carrying rclpy, lbr_fri_idl and pal_statistics_msgs together, and the
+# recorder needs all three (FRI state, plus CRISP introspection for the command channel).
+#
+# Editable and by path rather than pinned, because the recorder is under active development
+# against this cell and a pin would put a release cycle between finding a recording bug and
+# fixing it. Pin it once sessions are being kept: a dataset whose recorder cannot be
+# identified is a dataset whose columns cannot be explained.
+iiwa_next = { path = "../../iiwa_next", editable = true }
+# Parquet writer for the same. Not otherwise used by this workspace.
+pyarrow = ">=15"
