@@ -55,6 +55,28 @@ TARGET_TOPIC = "/lbr/target_pose"
 CURRENT_POSE_TOPIC = "/lbr/current_pose"
 JOINT_STATES_TOPIC = "/lbr/joint_states"
 
+# The nullspace target. CartesianController reads it as q_ref and drives the redundant degree of
+# freedom toward it -- the elbow swivel, which the task term leaves entirely free.
+#
+# A packet MAY carry a `joints` field; when it does, it is republished here alongside the pose.
+# Teleoperation never sends one, and that is exactly the gap this closes: over a 5.4-minute
+# recorded session q_ref had a range of 0.0000 rad on all seven joints, so the elbow never moved
+# and the visited configurations formed a 6-D sheet inside a 7-D space (participation ratio 3.49
+# of 7). An autonomous excitation plan commands both halves, so the seventh dimension is excited
+# on purpose rather than left to whatever posture the controller settled into.
+#
+# Same publisher-count trap as TARGET_TOPIC: CartesianController refuses every command on a topic
+# carrying more than one publisher, and says so only in the controller_manager's log.
+TARGET_JOINT_TOPIC = "/lbr/target_joint"
+
+#: Joint names in the order CartesianController expects, matching config/controllers.yaml.
+JOINT_NAMES = tuple(f"lbr_A{i + 1}" for i in range(7))
+
+#: Hard joint limits for the iiwa 14 R820, radians. The commanded nullspace target is clamped
+#: into these regardless of what arrives over the socket: q_ref is a spring anchor, and an anchor
+#: outside the physical range pulls with a force that grows the harder the joint resists.
+JOINT_LIMITS = np.radians(np.array([170.0, 120.0, 170.0, 120.0, 170.0, 120.0, 175.0]))
+
 # The operator's state, republished onto ROS so a data recorder can see it.
 #
 # It already goes back to the teleop over UDP in _reply(), but that socket is a private channel
@@ -121,6 +143,12 @@ class Bridge(Node):
         self._engaged_since: float | None = None
 
         self.pub = self.create_publisher(PoseStamped, TARGET_TOPIC, 1)
+        # Created unconditionally, published to only when a packet carries `joints`. Creating it
+        # lazily would put topic discovery in the path of the first commanded sample, which is
+        # the one sample that must not be late.
+        self.joint_pub = self.create_publisher(JointState, TARGET_JOINT_TOPIC, 1)
+        self.commanded_joints: np.ndarray | None = None
+        self.clamped_joint = 0
         # Depth 1: a recorder wants the newest state, never a queued one it would then stamp with
         # a fresh arrival time. Unlike TARGET_TOPIC, a second publisher here is harmless — nothing
         # actuates on it — so no publisher count is checked.
@@ -143,14 +171,15 @@ class Bridge(Node):
         # like a healthy bridge publishing into an arm that ignores it. Check once, loudly,
         # at the point where the cause is still obvious.
         time.sleep(0.5)  # let discovery settle before counting
-        others = self.count_publishers(TARGET_TOPIC) - 1
-        if others > 0:
-            self.get_logger().error(
-                f"{others} OTHER publisher(s) on {TARGET_TOPIC}. The CRISP controller "
-                f"refuses all commands while a command topic has more than one publisher, "
-                f"so teleop will do nothing. Usual cause: a crisp_py process (a session "
-                f"script, or an orphaned one) still publishing its own target."
-            )
+        for topic in (TARGET_TOPIC, TARGET_JOINT_TOPIC):
+            others = self.count_publishers(topic) - 1
+            if others > 0:
+                self.get_logger().error(
+                    f"{others} OTHER publisher(s) on {topic}. The CRISP controller "
+                    f"refuses all commands while a command topic has more than one publisher, "
+                    f"so teleop will do nothing. Usual cause: a crisp_py process (a session "
+                    f"script, or an orphaned one) still publishing its own target."
+                )
 
         self.create_timer(1.0 / args.rate, self._tick)
         self.create_timer(1.0, self._report)
@@ -296,6 +325,14 @@ class Bridge(Node):
             # a limit — which is what reported 22 m/s from a hand that never moved that fast.
             self._last_cmd_s = None
             self._engaged_since = time.monotonic()
+            # Anchor the nullspace on the arm's MEASURED joints, for the same reason the pose is
+            # anchored on the measured pose: q_ref is a spring anchor, and engaging with it set
+            # somewhere the elbow is not applies a step torque at the first tick.
+            self.commanded_joints = (
+                np.asarray(self.joint_positions[:7], dtype=float)
+                if self.joint_positions is not None and len(self.joint_positions) >= 7
+                else None
+            )
             self.get_logger().info(
                 f"clutch engaged #{self.engage_id} at {np.round(self.commanded[0], 4).tolist()} "
                 f"({gap * 1e3:.1f} mm / {np.degrees(ang):.2f} deg from measured)"
@@ -303,6 +340,55 @@ class Bridge(Node):
             return
 
         self.commanded = self._limit(position, rotation)
+        self.commanded_joints = self._limit_joints(packet.get("joints"))
+
+    def _limit_joints(self, requested: object) -> np.ndarray | None:
+        """Slew- and range-clamp a requested nullspace target.
+
+        Args:
+            requested: The packet's ``joints`` field, or ``None`` when it carried none.
+
+        Returns:
+            The clamped target, or the previous one when the packet carried nothing valid.
+
+        ``q_ref`` is the anchor of a spring, not a position the arm is ordered to occupy. Two
+        consequences, and both are the reason this is clamped rather than passed through:
+
+        - a **step** in the anchor is a step in torque, so the anchor is rate-limited exactly as
+          the pose is;
+        - an anchor **outside** the joint's physical range pulls with a force that grows the
+          harder the joint resists it, so it is held inside the limits whatever arrives.
+
+        A malformed field is treated as "no update" rather than as a reason to stop: the nullspace
+        holding its previous anchor is a safe, motionless state, and dropping the pose command
+        because a seventh number was unreadable would be a worse failure than ignoring it.
+        """
+        if requested is None:
+            return self.commanded_joints
+        try:
+            target = np.asarray(requested, dtype=float)
+        except (TypeError, ValueError):
+            self.get_logger().error("packet joints are not numeric; holding", throttle_duration_sec=2.0)
+            return self.commanded_joints
+        if target.shape != (7,) or not np.all(np.isfinite(target)):
+            self.get_logger().error(
+                "packet joints are not 7 finite numbers; holding", throttle_duration_sec=2.0
+            )
+            return self.commanded_joints
+
+        clipped = np.clip(target, -JOINT_LIMITS + self.args.joint_margin_rad,
+                          JOINT_LIMITS - self.args.joint_margin_rad)
+        if not np.allclose(clipped, target):
+            self.clamped_joint += 1
+
+        previous = self.commanded_joints
+        if previous is None:
+            return clipped
+        step = np.radians(self.args.max_joint_deg_s) / self.args.rate
+        delta = np.clip(clipped - previous, -step, step)
+        if not np.allclose(delta, clipped - previous):
+            self.clamped_joint += 1
+        return previous + delta
 
     def _limit(self, position: np.ndarray, rotation: Rotation) -> tuple[np.ndarray, Rotation]:
         """Slew-clamp toward the request and hold it inside the workspace box."""
@@ -390,6 +476,13 @@ class Bridge(Node):
         msg.pose.orientation.w = float(w)
         self.pub.publish(msg)
         self.published += 1
+
+        if self.commanded_joints is not None:
+            joints = JointState()
+            joints.header.stamp = msg.header.stamp
+            joints.name = list(JOINT_NAMES)
+            joints.position = [float(v) for v in self.commanded_joints]
+            self.joint_pub.publish(joints)
 
     def _publish_status(self) -> None:
         """Publish the operator's state onto ROS, every tick, engaged or not.
@@ -607,6 +700,13 @@ def main(argv: list[str] | None = None) -> int:
     # around 2 m/s on this bench), tight enough that one bad packet cannot become a lunge.
     parser.add_argument("--max-speed-m-s", type=float, default=1.0)
     parser.add_argument("--max-rot-deg-s", type=float, default=360.0)
+    # The nullspace anchor's slew limit. Well under the arm's rated joint speeds (75-135 deg/s)
+    # because this moves the elbow through a 3 Nm spring rather than commanding a position: the
+    # anchor outrunning the joint just winds the spring up to its torque clamp and stays there.
+    parser.add_argument("--max-joint-deg-s", type=float, default=45.0)
+    # Keep the anchor off the hard stops. The controller's own joint_limit_repulsion engages
+    # within 0.15 rad and would spend the session fighting an anchor parked inside that band.
+    parser.add_argument("--joint-margin-rad", type=float, default=0.15)
     # The force bound, and the one to think about: F_max = max_error_m * task stiffness.
     # At the configured 500 N/m, 0.05 m is 25 N; 20 Nm/rad and 15 deg is 5.2 Nm.
     parser.add_argument("--max-error-m", type=float, default=0.05)
