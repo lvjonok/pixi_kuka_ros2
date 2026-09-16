@@ -224,6 +224,21 @@
     use_gravity_compensation: false
     use_local_jacobian: true
 
+    # This controller publishes nothing — no reference, no error, no commanded torque — so
+    # introspection is the ONLY way to read what it is actually tracking. It registers
+    # error_0..5 (the task error that generates the torque), target_position_*/orientation_*,
+    # tau_task_*, tau_desired_*, q_target_* and q_ref_*, on
+    # /lbr/controller_manager/introspection_data/{names,values}.
+    #
+    # Needed because a learned free-space torque model is fed the command error, and the
+    # alternative — logging the target we publish ourselves — records a staircase at the
+    # teleop's publish rate rather than the reference the impedance law used, which an LSTM
+    # will happily memorise as a clock.
+    #
+    # It is read in on_configure (cartesian_controller.cpp:474), so setting the parameter on
+    # a configured controller does nothing: it takes effect on the next configure.
+    enable_introspection: true
+
 /**/joint_impedance_controller:
   ros__parameters:
     joints:
@@ -311,3 +326,8 @@
     use_coriolis_compensation: false
     use_gravity_compensation: false
     use_local_jacobian: true
+
+    # Same reasoning as the Cartesian entry above. Here q_ref IS the commanded joint
+    # reference (projector_type: none makes the nullspace term the whole law), so
+    # introspection is also what would make a joint-space command channel readable.
+    enable_introspection: true

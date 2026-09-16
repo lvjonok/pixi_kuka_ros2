@@ -1,0 +1,98 @@
+From fd64d0a13c860e8244af2d87346dca523d23816e Mon Sep 17 00:00:00 2001
+From: Lev Kozlov <kozlov.l.a10@gmail.com>
+Date: Wed, 16 Sep 2026 13:35:48 +0900
+Subject: [PATCH] feat: expose every term of the control law through
+ introspection
+
+The controller creates no publishers, so the only way to read what it is
+tracking is ros2_control introspection. It already registered tau_task,
+tau_desired, error, target_*, q_target and q_ref; this adds the rest of the
+law so a learned torque model can be ablated against each input separately
+instead of against their sum.
+
+Added: q_filtered / dq_filtered (the controller's own filtered state, which is
+what the law used -- FRI's raw q and the hardware interface's dq are what a
+recorder sees, and training on one while deploying against the other is
+silent), dq_ref, tau_nullspace, tau_secondary, tau_joint_limits, tau_wrench,
+tau_friction, tau_coriolis, tau_gravity, desired_position_*,
+desired_orientation_* and target_wrench_*.
+
+tau_joint_limits is the one that would hurt most by its absence: the repulsion
+field is added unprojected near a limit, so a model without it sees a torque
+with no cause among its inputs and attributes it to whatever state coincided.
+
+desired_* is the filtered pose target (filter.target_pose = 0.1) that `error`
+is measured against; target_* is the raw message. The difference between them
+is the lag a teleop introduces.
+
+All of these are existing members updated in place each tick, so this costs a
+pointer registration and nothing in the realtime loop. Verified against mock
+hardware: 126 channels register and publish at 499.98 Hz, the same tick rate
+as /lbr/lbr_state.
+
+Local change against upstream 0279dc8. Mirrored as a patch in the workspace at
+patches/crisp_controllers-introspection.patch, because the workspace gitignores
+this checkout and import_sources.sh clones it depth-1 with no ref.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+---
+ src/cartesian_controller.cpp | 43 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 43 insertions(+)
+
+diff --git a/src/cartesian_controller.cpp b/src/cartesian_controller.cpp
+index f1d8bd8..91ecf2a 100644
+--- a/src/cartesian_controller.cpp
++++ b/src/cartesian_controller.cpp
+@@ -493,6 +493,49 @@ CartesianController::on_configure(const rclcpp_lifecycle::State & /*previous_sta
+       REGISTER_ROS2_CONTROL_INTROSPECTION("q_target_" + std::to_string(i), &q_target[i]);
+       REGISTER_ROS2_CONTROL_INTROSPECTION("q_ref_" + std::to_string(i), &q_ref[i]);
+     }
++
++    // Every remaining term of the control law, so a learned torque model can be ablated
++    // against each input separately instead of against the sum. All of these are already
++    // members updated in place each tick, so publishing them costs a pointer registration
++    // and no extra computation in the realtime loop.
++    //
++    // Why each one is worth having:
++    //  - q / dq are the controller's own FILTERED state (filter.q, filter.dq = 0.2), which
++    //    is what the law used; FRI's raw q and the hardware interface's dq are what a
++    //    recorder sees. Training on one and deploying against the other is silent.
++    //  - dq_ref is the velocity reference; the joint-space error the paper calls delta_q_d
++    //    is q_ref - q, derived from two channels published here rather than added as a
++    //    third member nobody else reads.
++    //  - the torque terms decompose tau_desired. tau_joint_limits especially: the repulsion
++    //    field is added unprojected near a limit, so without it a model sees a torque with
++    //    no cause in its inputs and learns to attribute it to the state that happened to
++    //    coincide.
++    //  - desired_* is the FILTERED pose target (filter.target_pose = 0.1) that `error` is
++    //    actually measured against, as opposed to target_*, which is the raw message. The
++    //    difference between the two is the lag a teleop introduces.
++    for (int i = 0; i < q.size(); ++i) {
++      REGISTER_ROS2_CONTROL_INTROSPECTION("q_filtered_" + std::to_string(i), &q[i]);
++      REGISTER_ROS2_CONTROL_INTROSPECTION("dq_filtered_" + std::to_string(i), &dq[i]);
++      REGISTER_ROS2_CONTROL_INTROSPECTION("dq_ref_" + std::to_string(i), &dq_ref[i]);
++      REGISTER_ROS2_CONTROL_INTROSPECTION("tau_nullspace_" + std::to_string(i), &tau_nullspace[i]);
++      REGISTER_ROS2_CONTROL_INTROSPECTION("tau_secondary_" + std::to_string(i), &tau_secondary[i]);
++      REGISTER_ROS2_CONTROL_INTROSPECTION(
++        "tau_joint_limits_" + std::to_string(i), &tau_joint_limits[i]);
++      REGISTER_ROS2_CONTROL_INTROSPECTION("tau_wrench_" + std::to_string(i), &tau_wrench[i]);
++      REGISTER_ROS2_CONTROL_INTROSPECTION("tau_friction_" + std::to_string(i), &tau_friction[i]);
++      REGISTER_ROS2_CONTROL_INTROSPECTION("tau_coriolis_" + std::to_string(i), &tau_coriolis[i]);
++      REGISTER_ROS2_CONTROL_INTROSPECTION("tau_gravity_" + std::to_string(i), &tau_gravity[i]);
++    }
++    REGISTER_ROS2_CONTROL_INTROSPECTION("desired_position_x", &desired_position_[0]);
++    REGISTER_ROS2_CONTROL_INTROSPECTION("desired_position_y", &desired_position_[1]);
++    REGISTER_ROS2_CONTROL_INTROSPECTION("desired_position_z", &desired_position_[2]);
++    for (int i = 0; i < desired_orientation_.coeffs().size(); ++i) {
++      REGISTER_ROS2_CONTROL_INTROSPECTION(
++        "desired_orientation_" + std::to_string(i), &desired_orientation_.coeffs()[i]);
++    }
++    for (int i = 0; i < target_wrench_.size(); ++i) {
++      REGISTER_ROS2_CONTROL_INTROSPECTION("target_wrench_" + std::to_string(i), &target_wrench_[i]);
++    }
+   } else {
+     RCLCPP_INFO(get_node()->get_logger(), "ROS2 Control Introspection is disabled.");
+   }
+-- 
+2.43.0
+
