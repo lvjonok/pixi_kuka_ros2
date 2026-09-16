@@ -189,9 +189,9 @@
       k_rot_y: 20.0
       k_rot_z: 20.0
 
-      d_pos_x: 50.0
-      d_pos_y: 50.0
-      d_pos_z: 50.0
+      d_pos_x: 30.0
+      d_pos_y: 30.0
+      d_pos_z: 30.0
       d_rot_x: 13.4
       d_rot_y: 13.4
       d_rot_z: 13.4
