@@ -42,6 +42,7 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseStamped
 from rclpy._rclpy_pybind11 import RCLError
+from std_msgs.msg import Float64MultiArray, MultiArrayDimension
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -53,6 +54,35 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
 TARGET_TOPIC = "/lbr/target_pose"
 CURRENT_POSE_TOPIC = "/lbr/current_pose"
 JOINT_STATES_TOPIC = "/lbr/joint_states"
+
+# The operator's state, republished onto ROS so a data recorder can see it.
+#
+# It already goes back to the teleop over UDP in _reply(), but that socket is a private channel
+# between two processes on loopback. A recorder has no business reading it, and without this topic
+# a recording cannot distinguish "the operator was driving" from "the arm was holding still under
+# impedance" — two states whose rows look identical and mean entirely different things, because
+# held rows are near-duplicates of each other and will dominate any stride-1 window set.
+#
+# It also carries the clamp counters, which is the part that matters for the science rather than
+# the bookkeeping: --max-error-m clamps command error to bound the impedance force (500 N/m x
+# 0.05 m = 25 N), and it fires during ordinary motion. The recorded command channel is therefore a
+# SATURATED distribution, and a model fitted to it meets unclipped inputs the moment the envelope
+# is widened. That has to be visible per row, not just in this process's log line.
+#
+# Float64MultiArray because it needs no new message package in either workspace. The cost is that
+# the wire carries no field names, so a reordering here would silently move the engage flag into a
+# clamp counter and every recorded value would still look plausible. STATUS_LABEL is the guard: it
+# goes in layout.dim[0].label, the consumer compares it exactly and refuses to decode anything
+# else. Change the field order -> bump the version in the label. The reader is
+# iiwa_next.introspection.decode_teleop_status against iiwa_next.schema.TELEOP_STATUS_LABEL, and a
+# test in that repo asserts the two strings match.
+#
+# Counters are cumulative rather than per-tick booleans: a burst of clamps inside one consumer tick
+# would be invisible as a boolean, and a counter that only increases survives a dropped status
+# message — the consumer sees a jump rather than a silent zero.
+STATUS_TOPIC = "/haply_teleop/status"
+STATUS_FIELDS = ("engaged", "engage_id", "clamped_lin", "clamped_rot", "clamped_box", "clamped_err")
+STATUS_LABEL = "haply_teleop_status/1:" + ",".join(STATUS_FIELDS)
 
 # The arm holds its pose under impedance, so "stop publishing" is a hold, not a release.
 # Everything that goes wrong here resolves to that.
@@ -91,6 +121,10 @@ class Bridge(Node):
         self._engaged_since: float | None = None
 
         self.pub = self.create_publisher(PoseStamped, TARGET_TOPIC, 1)
+        # Depth 1: a recorder wants the newest state, never a queued one it would then stamp with
+        # a fresh arrival time. Unlike TARGET_TOPIC, a second publisher here is harmless — nothing
+        # actuates on it — so no publisher count is checked.
+        self.status_pub = self.create_publisher(Float64MultiArray, STATUS_TOPIC, 1)
         self.create_subscription(
             PoseStamped, CURRENT_POSE_TOPIC, self._on_pose, qos_profile_sensor_data
         )
@@ -163,6 +197,16 @@ class Bridge(Node):
     # -- the tick -------------------------------------------------------------------
 
     def _tick(self) -> None:
+        """One tick: decide what the arm is told, then say what state the operator was in.
+
+        The decision is `_decide`, unchanged. The status publish is here, after it and outside it,
+        so that it happens on EVERY path — including the watchdog's early return, which is exactly
+        the moment a recorder most needs to see that engagement dropped.
+        """
+        self._decide()
+        self._publish_status()
+
+    def _decide(self) -> None:
         packet = self._drain()
         now = time.monotonic()
         if packet is not None:
@@ -346,6 +390,36 @@ class Bridge(Node):
         msg.pose.orientation.w = float(w)
         self.pub.publish(msg)
         self.published += 1
+
+    def _publish_status(self) -> None:
+        """Publish the operator's state onto ROS, every tick, engaged or not.
+
+        Every tick and unconditionally: a recorder needs "not engaged" just as much as "engaged",
+        and publishing only while engaged would make a disengaged stretch indistinguishable from a
+        bridge that had died — which is the difference between a recording with real hold data in it
+        and a recording with no teleop state at all.
+
+        Nothing here touches the command path. This publishes what the tick already decided; it
+        cannot change what reaches the arm.
+        """
+        msg = Float64MultiArray()
+        dim = MultiArrayDimension()
+        # The field-order contract. A consumer that sees anything else must refuse to decode,
+        # because a positional read of the wrong order produces plausible numbers in the wrong
+        # columns and nothing downstream can tell.
+        dim.label = STATUS_LABEL
+        dim.size = len(STATUS_FIELDS)
+        dim.stride = len(STATUS_FIELDS)
+        msg.layout.dim = [dim]
+        msg.data = [
+            float(self.engaged),
+            float(self.engage_id if self.engage_id is not None else -1),
+            float(self.clamped_lin),
+            float(self.clamped_rot),
+            float(self.clamped_box),
+            float(self.clamped_err),
+        ]
+        self.status_pub.publish(msg)
 
     def _reply(self) -> None:
         """Send the arm's own state back, so the preview can draw the real robot."""
