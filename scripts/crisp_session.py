@@ -33,6 +33,8 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
 from kuka_crisp import (
     HOME_DEGREES,
     HOME_SPEED_DEG_S,
+    ZERO_EFFORT,
+    active_controllers,
     make_kuka_robot,
     move_to_home,
     safe_switch,
@@ -105,6 +107,15 @@ def main() -> int:
             print(f"\nrefusing to move: {GATE} is not active.")
             robot.shutdown()
             return 1
+        # Switch to zero-effort here, in the SAME process, immediately before moving. It is a
+        # precondition of move_to_home -- the torque overlay must be owned and held at zero for
+        # the whole move -- but running it as a separate command leaves the arm held only by
+        # Sunrise's impedance about a mirrored measured position, which has no static stiffness.
+        # The arm relaxes and sags in that gap. It did, on 17 Sep 2026, with a human waiting to
+        # type the second command. The two are one operation and this is where they join.
+        if ZERO_EFFORT not in active_controllers(robot):
+            print(f"\nswitching to {ZERO_EFFORT} and moving immediately (no pause: the arm sags)")
+            safe_switch(robot, ZERO_EFFORT)
         print("\nmoving to home. Keep the enabling switch held.")
         move_to_home(robot, speed_deg_s=args.speed)
         q = np.asarray(robot.joint_values, dtype=float)
