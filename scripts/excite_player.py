@@ -583,7 +583,28 @@ def main(argv: list[str] | None = None) -> int:
     # about the same numbers the bridge is enforcing.
     # The interlock. 25 mm is half the bridge's 50 mm error clamp, so the plan stops
     # advancing well before the task term saturates rather than after.
-    parser.add_argument("--freeze-mm", type=float, default=25.0)
+    # 40 mm, measured rather than chosen. At 25 mm this aborted a healthy run 2.2 minutes in
+    # (excite_08, 17 Sep 2026, ~/data/runs/20260917-011905-93e47a6a), and the bag says why: the
+    # arm's steady-state tracking error is a function of commanded SPEED, and it is worst when the
+    # command moves slowest --
+    #
+    #     cmd speed mm/s   0-0.5   0.5-1     1-2    5-10   20-50
+    #     error p50 mm      8.92    8.81    3.80    3.15    3.67
+    #     correlation(commanded speed, error) = -0.387
+    #
+    # which is the opposite of a tracking lag and is stiction in the harmonic drives: `use_friction`
+    # is false on this cell and Sunrise compensates gravity but not friction, so nothing cancels it.
+    # p90 at low speed was 25 mm, so 25 was always going to trip. And the plan SPENDS time there on
+    # purpose: `PlanConfig.speed_decades` spans 0.3% to 30% of datasheet speed because the Stribeck
+    # term has decayed by roughly three times the Stribeck velocity, so the slow decade is the data
+    # the session exists to collect. A threshold that aborts on it is fighting the experiment.
+    #
+    # 40 and not more: the bridge clamps the command error at `max_error_m` = 50 mm, and above that
+    # clamp the task term sits pinned at maximum force -- which is the state that walked A7 into its
+    # stop on an earlier run. This must stay below it. The guard against a joint limit is not this
+    # number anyway, it is `--abort-headroom-deg`; in the run above the closest joint never came
+    # within 33 deg of a stop.
+    parser.add_argument("--freeze-mm", type=float, default=40.0)
     # Well outside the 14 deg where joint_limit_repulsion now engages, so the player
     # stops before the controller is relying on a spring to save it.
     parser.add_argument("--abort-headroom-deg", type=float, default=20.0)
