@@ -65,6 +65,15 @@ ruff = "*"
 iiwa_next = { path = "../../iiwa_next", editable = true }
 # Parquet writer for the same. Not otherwise used by this workspace.
 pyarrow = ">=15"
+# The live view for an autonomous excitation run: the plan drawn as a translucent ghost beside the
+# arm's measured configuration. It belongs HERE and not only on the laptop, because the thing it
+# exists to show is the *gap* between those two, and the measured half only exists on the machine
+# talking to the cell. A PyPI wheel rather than conda: viser is pure Python with a bundled web
+# client, so it has nothing to gain from the solver that also has to satisfy robostack, and every
+# package added to that solve is another chance to move the ROS pins. The `urdf` extra pulls
+# yourdfpy, without which `ViserUrdf` raises at construction -- so the view would die at exactly
+# the moment someone started a run in order to watch it.
+viser = { version = ">=0.2", extras = ["urdf"] }
 # CPU torch, so `iiwa-next live` can run the trained estimator beside the arm and show the
 # residual while someone pushes it. A PyPI wheel, never conda: the wheels vendor their own CUDA
 # and MKL and depend only on numpy, which keeps torch out of the solver that also has to satisfy
