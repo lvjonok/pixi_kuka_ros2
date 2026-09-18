@@ -487,7 +487,19 @@ class Player:
                     behind_since = None
                     plan_time += dt * scale
 
-                index = min(total - 1, int(plan_time * rate))
+                # `reached` is the sample the plan clock is actually at; `index` is that clamped
+                # to the last row so it can index the arrays. They must stay separate, because the
+                # loop's exit test is about the former.
+                #
+                # They were the same variable, clamped, and the loop condition was
+                # `index < total` -- which a value capped at `total - 1` never satisfies, so the
+                # player streamed the final sample forever. It took until the first run that
+                # reached the end to find: every earlier run left through an abort or a freeze, so
+                # the completion path had never once executed. The bug was in the success case.
+                reached = int(plan_time * rate)
+                index = min(total - 1, reached)
+                if reached >= total:
+                    break
 
                 packet = {
                     "engaged": True,
