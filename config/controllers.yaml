@@ -241,12 +241,36 @@
       # 2*sqrt(5) = 4.47. The previous 10.0 was zeta 2.24 — the elbow dragged through
       # molasses on every motion, for no stated reason.
       damping: 4.5
-      max_tau: 3.0
+      # Was 3.0, which could not do the job this term exists for. Measured from a bag of an
+      # autonomous excitation run (excite_02, 2026-09-16), peak per joint:
+      #
+      #     tau_task        9.7  11.2   6.8  11.2   5.6   9.7   8.1  Nm
+      #     tau_nullspace   1.5   1.0   1.9   0.0   2.7   0.4   1.6  Nm
+      #
+      # The nullspace term was outgunned roughly 5:1 by the task term, so the redundant degree
+      # of freedom was not controlled by anything: a commanded POSE does not pin the wrist, and
+      # with target_joint unable to hold it either, A7 wandered to -175.1 deg against a +/-175
+      # limit and tripped the hardware stop — while being commanded no further than -129.5.
+      #
+      # 10 Nm puts the achievable nullspace torque at ~14 Nm, above the 11.2 Nm peak task
+      # torque, so the term can actually hold the configuration it is given. Offline over 200
+      # sampled configurations this takes the fraction where gravity alone defeats the term
+      # from 48% to 0%, which is also what the excitation data needs: at 3 Nm the arm's
+      # configurations collapse onto a 6-D sheet inside a 7-D space.
+      #
+      # It is 5% of the 200 Nm joint effort limit. It DOES make the elbow noticeably stiffer to
+      # push by hand, which matters because this is the deployment controller too.
+      max_tau: 10.0
 
     joint_limit_repulsion:
       enabled: true
-      safe_range: 0.15
-      max_torque: 3.0
+      # Engage earlier: 0.15 rad is 8.6 deg of runway to stop a joint the task term is pushing.
+      safe_range: 0.25
+      # Was 3.0, and in the same bag it sat pinned at exactly 3.00 Nm on A7 while the task term
+      # pushed with 8.11 Nm — saturated, losing, and the only thing standing between the plan
+      # and the stop. A guard capped below the force it has to resist is not a guard. 15 Nm
+      # clears the 11.2 Nm peak task torque with margin.
+      max_torque: 15.0
 
     max_delta_tau: 2.0
     limit_error: false
