@@ -44,6 +44,10 @@ setup = { depends-on = ["build"] }
 mock = "ros2 launch pixi_kuka_ros2 crisp_mock.launch.py"
 mock-loopback = "env CYCLONEDDS_URI=file://$PWD/config/cyclonedds_loopback.xml ros2 launch pixi_kuka_ros2 crisp_mock.launch.py"
 hardware = "ros2 launch pixi_kuka_ros2 crisp_hardware.launch.py"
+# The UMI fitted and the Cartesian endpoint at its camera. Nothing that speaks lbr_link_ee may
+# run against it: see config/controllers_umi.yaml.
+hardware-umi = "ros2 launch pixi_kuka_ros2 crisp_hardware.launch.py tool:=umi"
+mock-umi = "env CYCLONEDDS_URI=file://$PWD/config/cyclonedds_loopback.xml ros2 launch pixi_kuka_ros2 crisp_mock.launch.py tool:=umi"
 controllers = "ros2 control list_controllers -c /lbr/controller_manager"
 interfaces = "ros2 control list_hardware_interfaces -c /lbr/controller_manager"
 session = "env CYCLONEDDS_URI=file://$PWD/config/cyclonedds_loopback.xml python scripts/crisp_session.py"

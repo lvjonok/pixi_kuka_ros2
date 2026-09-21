@@ -71,4 +71,22 @@ if [[ ! -d "${crisp_py_dir}/.git" ]]; then
 fi
 touch "${crisp_py_dir}/COLCON_IGNORE"
 
+# The arm WITH what is bolted to it: iiwa14 + UMI backplate + D405 + tweezer jaws, so the
+# controllers can be pointed at the camera (launch tool:=umi). Private to the lab org, and
+# pinned by commit because the frame the policy is driven in is defined by this file -- a moved
+# branch would move the camera frame under a running experiment with nothing to show for it.
+# Upstream lbr_ros2_control's iiwa14.xacro stays the default description (tool:=none).
+iris_dir="src/iris_robots_description"
+iris_rev="${IRIS_DESCRIPTION_REV:-9eef1e6}"
+if [[ ! -d "${iris_dir}/.git" ]]; then
+    git clone git@github.com:KAIST-IRiS-Haptics-Telerobotics/iris_robots_description.git "${iris_dir}"
+    git -C "${iris_dir}" checkout --quiet "${iris_rev}"
+fi
+actual_iris_rev="$(git -C "${iris_dir}" rev-parse --short=7 HEAD)"
+if [[ "${actual_iris_rev}" != "${iris_rev:0:7}" ]]; then
+    echo "${iris_dir} is at ${actual_iris_rev}, pinned ${iris_rev}. Check it out, or set" >&2
+    echo "IRIS_DESCRIPTION_REV to say the move is deliberate." >&2
+    exit 4
+fi
+
 echo "Sources are present for FRI ${fri_client_version} (manifest: ${manifest})."

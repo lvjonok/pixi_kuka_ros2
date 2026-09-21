@@ -1,0 +1,30 @@
+# Overlay on controllers.yaml for launch `tool:=umi`: the Cartesian endpoint IS the wrist camera.
+#
+# Loaded AFTER controllers.yaml, so only the keys below change. With it the controller tracks
+# `lbr_umi_camera` and `pose_broadcaster` publishes /lbr/current_pose as the camera pose, which
+# is what the Panda cell does with `panda_umi_camera` and what a policy trained on hand-held
+# camera poses composes its SE(3)-relative chunks onto -- no flange conjugation anywhere.
+#
+# The frame comes from iris_robots_description's iiwa14_umi.urdf.xacro (mount_clock 135 deg,
+# observed 21 Sep 2026). Nominally 90.5 mm from lbr_link_ee: t = (-81.6, -1.5, +39.1) mm, and
+# the optical axis tilted 25 deg off the flange axis. That is a CAD number, not a hand-eye
+# measurement; nothing here has checked it against the physical camera.
+#
+# EVERY OTHER CLIENT OF /lbr/target_pose SPEAKS lbr_link_ee: iiwa-next's excitation player,
+# haply_teleop_bridge.py, crisp_session.py. Under this overlay each of them would be commanding
+# the camera to where it meant the flange -- a 90 mm displacement and a 25 deg rotation that no
+# check of theirs can see. Excitation and teleop sessions run with tool:=none.
+#
+# The wrench estimator stays on lbr_link_ee: it is a KDL chain in the arm's own terms and its
+# consumers (force_torque_broadcaster, iiwa_next) read it there.
+/**/pose_broadcaster:
+  ros__parameters:
+    end_effector_frame: lbr_umi_camera
+
+/**/twist_broadcaster:
+  ros__parameters:
+    end_effector_frame: lbr_umi_camera
+
+/**/cartesian_impedance_controller:
+  ros__parameters:
+    end_effector_frame: lbr_umi_camera
