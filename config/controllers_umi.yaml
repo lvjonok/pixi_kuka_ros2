@@ -28,3 +28,23 @@
 /**/cartesian_impedance_controller:
   ros__parameters:
     end_effector_frame: lbr_umi_camera
+
+    # Rotation, stiffer than the excitation profile's 60, because here orientation is half of
+    # what is being commanded: a policy's chunk is a camera pose, and the operator's first drive
+    # with camera_gizmo.py (21 Sep 2026) found rotation lagging and falling short where
+    # translation did not. 100 is not a tuning result, it is crisp's ceiling:
+    # variable_max_stiffness.rotational is validated to [0, 100] in cartesian_controller.yaml,
+    # and k_rot above it is clamped with only a throttled warning. Past 100 needs that bound
+    # patched. At the gizmo's 10 deg error clamp this is 17.5 Nm about the camera.
+    #
+    # Only the rotational keys are restated; the translational ones stay controllers.yaml's.
+    task:
+      k_rot_x: 100.0
+      k_rot_y: 100.0
+      k_rot_z: 100.0
+      # 2*sqrt(100): zeta 1 at unit inertia, the same rule controllers.yaml uses for its 15.5.
+      d_rot_x: 20.0
+      d_rot_y: 20.0
+      d_rot_z: 20.0
+    variable_max_stiffness:
+      rotational: 100.0
