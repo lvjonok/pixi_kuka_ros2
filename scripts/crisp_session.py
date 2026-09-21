@@ -6,6 +6,7 @@ is activated.
 
     pixi run -e jazzy session                       # status only
     pixi run -e jazzy session --home                # MOVES THE ARM to home
+    pixi run -e jazzy session --home --home-file F  # MOVES THE ARM to a captured home
     pixi run -e jazzy session --switch joint_impedance_controller
     pixi run -e jazzy session --switch zero_effort_controller
 
@@ -25,7 +26,9 @@ active controller that is not named "*broadcaster".
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from pathlib import Path
 
 import numpy as np
 
@@ -66,8 +69,25 @@ def main() -> int:
         metavar="CONTROLLER",
         help="activate this controller via safe_switch (holds the passthrough active)",
     )
+    parser.add_argument(
+        "--home-file",
+        type=Path,
+        default=None,
+        help="home to this capture (scripts/capture_home.py) instead of HOME_DEGREES",
+    )
     parser.add_argument("--timeout", type=float, default=15.0)
     args = parser.parse_args()
+
+    home_degrees = list(HOME_DEGREES)
+    if args.home_file is not None:
+        # A home captured at the arm, for an experiment that wants every run to start from the
+        # same posture. Names are checked, not assumed: a Panda home has seven numbers too.
+        captured = json.loads(args.home_file.expanduser().read_text())
+        names = [n.removesuffix(".pos") for n in captured["joint_names"]]
+        if names != [f"lbr_A{i + 1}" for i in range(7)]:
+            parser.error(f"{args.home_file} names {names}, not lbr_A1..lbr_A7")
+        home_degrees = [float(np.degrees(v)) for v in captured["position"]]
+        print(f"home from {args.home_file}: {np.round(home_degrees, 2).tolist()} deg")
 
     if args.home and args.switch:
         parser.error("--home and --switch are separate steps; run them one at a time.")
@@ -96,11 +116,11 @@ def main() -> int:
     q = np.asarray(robot.joint_values, dtype=float)
     print("\njoint positions [deg]:", np.array2string(np.rad2deg(q), precision=1))
     print(
-        "home target     [deg]:", np.array2string(np.asarray(HOME_DEGREES), precision=1)
+        "home target     [deg]:", np.array2string(np.asarray(home_degrees), precision=1)
     )
     print(
         "delta from home [deg]:",
-        np.array2string(np.rad2deg(q) - np.asarray(HOME_DEGREES), precision=1),
+        np.array2string(np.rad2deg(q) - np.asarray(home_degrees), precision=1),
     )
 
     pose = robot.end_effector_pose
@@ -122,12 +142,12 @@ def main() -> int:
             print(f"\nswitching to {ZERO_EFFORT} (rest, held by the trajectory controller)")
             safe_switch(robot, ZERO_EFFORT)
         print("\nmoving to home. Keep the enabling switch held.")
-        move_to_home(robot, speed_deg_s=args.speed)
+        move_to_home(robot, degrees=home_degrees, speed_deg_s=args.speed)
         q = np.asarray(robot.joint_values, dtype=float)
         print("\njoint positions [deg]:", np.array2string(np.rad2deg(q), precision=1))
         print(
             "delta from home [deg]:",
-            np.array2string(np.rad2deg(q) - np.asarray(HOME_DEGREES), precision=1),
+            np.array2string(np.rad2deg(q) - np.asarray(home_degrees), precision=1),
         )
         print("active controllers now:")
         for controller in sorted(
