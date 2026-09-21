@@ -27,6 +27,12 @@ defaults because a mouse can jump a gizmo a metre in one event:
   the topic disengages. Disengaged means NOT PUBLISHING: the controller holds its last target
   under impedance.
 
+Two corrections, off until ticked under "correction", for the ~1 cm the arm trails by: an
+integral that absorbs the static offset (undeclared UMI weight, stiction), and a velocity lead of
+(D/K) v that cancels the damping drag while moving. Both are added AFTER the walk and BEFORE the
+bounds above, so neither can push past the force bound or the box. "gizmo - arm, 2 s" is the
+number to compare with them on and off.
+
 Arming and resting are buttons, and they are the same two STRICT switches as
 kuka_crisp.safe_switch -- REST (trajectory + zero effort) <-> ARMED (passthrough + Cartesian) --
 issued here directly on the controller_manager service. Not through crisp_py: its Robot starts a
@@ -117,6 +123,14 @@ class CameraGizmo(Node):
         self.q: np.ndarray | None = None
         self.q_at: float | None = None
         self.commanded: Pose | None = None
+        # Where the arm SHOULD be: the gizmo, walked at the slider speeds. `commanded` is this
+        # plus the corrections, and is what is published.
+        self.reference: Pose | None = None
+        self.i_pos = np.zeros(3)
+        self.i_rot = np.zeros(3)
+        self.saturated = False
+        self.error_log: list[tuple[float, float, float]] = []  # (t, mm, deg) reference vs arm
+        self.gains: dict[str, float] = {}
         self.engaged = False
         self.engage_requested = False
         self.status = "disengaged"
@@ -184,7 +198,10 @@ class CameraGizmo(Node):
             client = self.create_client(GetParameters, f"{NS}/{controller}/get_parameters")
             if not client.wait_for_service(timeout_sec=5.0):
                 raise SystemExit(f"{controller} is not loaded; cannot read its end_effector_frame")
-            request = GetParameters.Request(names=["end_effector_frame"])
+            names = ["end_effector_frame"]
+            if controller == CARTESIAN:
+                names += ["task.k_pos_x", "task.d_pos_x", "task.k_rot_x", "task.d_rot_x"]
+            request = GetParameters.Request(names=names)
             future = client.call_async(request)
             rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
             if future.result() is None or not future.result().values:
@@ -196,8 +213,21 @@ class CameraGizmo(Node):
                     f"Targets from here would move {frame} to where the camera was meant to go. "
                     f"Relaunch with tool:=umi."
                 )
+            for name, value in zip(names[1:], future.result().values[1:]):
+                self.gains[name] = value.double_value
             self.destroy_client(client)
             print(f"  {controller}.end_effector_frame = {frame}", flush=True)
+        # The lead that cancels the damping drag. crisp damps against MEASURED velocity with the
+        # target's velocity taken as zero, so a target moving at v holds a steady-state error of
+        # (D/K) v behind it; sending the target (D/K) v ahead of itself cancels that.
+        self.lead_pos_s = self.gains["task.d_pos_x"] / self.gains["task.k_pos_x"]
+        self.lead_rot_s = self.gains["task.d_rot_x"] / self.gains["task.k_rot_x"]
+        print(
+            f"  gains k_pos {self.gains['task.k_pos_x']:.0f} d_pos {self.gains['task.d_pos_x']:.1f}"
+            f" -> lead {self.lead_pos_s * 1e3:.0f} ms; k_rot {self.gains['task.k_rot_x']:.0f}"
+            f" d_rot {self.gains['task.d_rot_x']:.1f} -> lead {self.lead_rot_s * 1e3:.0f} ms",
+            flush=True,
+        )
 
     # -- inputs -------------------------------------------------------------------------
 
@@ -272,6 +302,8 @@ class CameraGizmo(Node):
                 self.gui_engage.value = False
             else:
                 self.commanded = (measured[0].copy(), measured[1])
+                self.reference = self.commanded
+                self._reset_corrections()
                 self._snap_gizmo(measured)
                 self.engaged = True
                 self.status = "ENGAGED -- drag the gizmo"
@@ -289,8 +321,15 @@ class CameraGizmo(Node):
             self._publish(self.commanded)
 
     def _limit(self, goal: Pose, measured: Pose) -> Pose:
-        """Walk the target toward the gizmo, inside the error bound and the box."""
-        prev_p, prev_r = self.commanded
+        """Walk the reference toward the gizmo, add the corrections, bound what is sent."""
+        previous = self.reference
+        self.reference = self._bound(self._walk(goal, previous), measured, count=False)
+        self._log_error(self.reference, measured)
+        return self._bound(self._correct(self.reference, previous, measured), measured)
+
+    def _walk(self, goal: Pose, previous: Pose) -> Pose:
+        """Step from the previous reference toward the gizmo at the slider speeds."""
+        prev_p, prev_r = previous
         position, rotation = goal
 
         step = position - prev_p
@@ -306,25 +345,85 @@ class CameraGizmo(Node):
         if ang > max_ang:
             rotation = Rotation.from_rotvec(delta.as_rotvec() * (max_ang / ang)) * prev_r
             self.clamped["rot"] += 1
+        return position, rotation
 
+    def _correct(self, reference: Pose, previous: Pose, measured: Pose) -> Pose:
+        """The two client-side corrections, both off unless ticked.
+
+        integral: the arm stops SHORT of a static target -- the UMI's ~0.4 kg is declared to
+        neither Sunrise nor crisp (~3 mm at 1300 N/m), and stiction holds the proximal joints
+        (A1 breaks away near 8 Nm). crisp has no integral term, so this integrates the
+        reference-to-arm error into an offset on what is sent. A deadband keeps it from hunting
+        on stiction, a cap bounds it, and it freezes while the output is being force-clamped.
+
+        lead: the arm LAGS a moving target by (D/K) v, because crisp's damping acts on measured
+        velocity against a zero target velocity. Sending the reference ahead by (D/K) v cancels
+        it at constant speed.
+        """
+        ref_p, ref_r = reference
+        out_p, out_rv = ref_p.copy(), np.zeros(3)
+
+        if self.gui_integral.value and not self.saturated:
+            dt = 1.0 / self.args.rate
+            ki = self.gui_ki.value
+            e_p = ref_p - measured[0]
+            if np.linalg.norm(e_p) > self.args.deadband_mm / 1e3:
+                self.i_pos += ki * e_p * dt
+            e_r = (ref_r * measured[1].inv()).as_rotvec()
+            if np.linalg.norm(e_r) > np.radians(self.args.deadband_deg):
+                self.i_rot += ki * e_r * dt
+            self.i_pos = _cap(self.i_pos, self.args.max_integral_mm / 1e3)
+            self.i_rot = _cap(self.i_rot, np.radians(self.args.max_integral_deg))
+        if self.gui_integral.value:
+            out_p += self.i_pos
+            out_rv += self.i_rot
+
+        if self.gui_lead.value:
+            v = (ref_p - previous[0]) * self.args.rate
+            w = (ref_r * previous[1].inv()).as_rotvec() * self.args.rate
+            out_p += self.lead_pos_s * v
+            out_rv += self.lead_rot_s * w
+
+        return out_p, Rotation.from_rotvec(out_rv) * ref_r
+
+    def _bound(self, pose: Pose, measured: Pose, *, count: bool = True) -> Pose:
+        """The workspace box, and the force bound: F = k (target - measured), so cap the gap."""
+        position, rotation = pose
+        saturated = False
         clipped = np.clip(position, self.box_lo, self.box_hi)
         if not np.allclose(clipped, position):
-            self.clamped["box"] += 1
+            self.clamped["box"] += count
         position = clipped
 
-        # The force bound: F = k * (target - measured), so cap the gap, not the speed.
         gap = position - measured[0]
         dist = float(np.linalg.norm(gap))
         if dist > self.args.max_error_m:
             position = measured[0] + gap * (self.args.max_error_m / dist)
-            self.clamped["error"] += 1
+            saturated = True
         delta_r = rotation * measured[1].inv()
         ang_r = float(delta_r.magnitude())
         max_ang_r = np.radians(self.args.max_error_deg)
         if ang_r > max_ang_r:
             rotation = Rotation.from_rotvec(delta_r.as_rotvec() * (max_ang_r / ang_r)) * measured[1]
-            self.clamped["error"] += 1
+            saturated = True
+        if count:
+            self.clamped["error"] += saturated
+            self.saturated = saturated
         return position, rotation
+
+    def _reset_corrections(self) -> None:
+        self.i_pos = np.zeros(3)
+        self.i_rot = np.zeros(3)
+        self.saturated = False
+        self.error_log.clear()
+
+    def _log_error(self, reference: Pose, measured: Pose) -> None:
+        now = time.monotonic()
+        mm = float(np.linalg.norm(reference[0] - measured[0]) * 1e3)
+        deg = float(np.degrees((reference[1] * measured[1].inv()).magnitude()))
+        self.error_log.append((now, mm, deg))
+        while self.error_log and now - self.error_log[0][0] > 2.0:
+            self.error_log.pop(0)
 
     def _publish(self, pose: Pose) -> None:
         msg = PoseStamped()
@@ -340,6 +439,8 @@ class CameraGizmo(Node):
     def _disengage(self, status: str) -> None:
         self.engaged = False
         self.commanded = None
+        self.reference = None
+        self._reset_corrections()
         self.status = status
         self.gui_engage.value = False
         print(f"  {status} -- publication stopped, the arm holds its last target")
@@ -451,6 +552,12 @@ class CameraGizmo(Node):
             self.gui_gap = gui.add_text("target - arm", initial_value="", disabled=True)
             self.gui_lag = gui.add_text("gizmo - target", initial_value="", disabled=True)
             self.gui_clamps = gui.add_text("clamps", initial_value="", disabled=True)
+        with gui.add_folder("correction"):
+            self.gui_track = gui.add_text("gizmo - arm, 2 s", initial_value="", disabled=True)
+            self.gui_integral = gui.add_checkbox("integral (static offset)", initial_value=False)
+            self.gui_ki = gui.add_slider("ki 1/s", min=0.1, max=5.0, step=0.1, initial_value=1.0)
+            self.gui_lead = gui.add_checkbox("velocity lead (D/K v)", initial_value=False)
+            self.gui_offset = gui.add_text("integral now", initial_value="", disabled=True)
         with gui.add_folder("nudge (camera axes)"):
             self.gui_step = gui.add_slider(
                 "step mm", min=1.0, max=50.0, step=1.0, initial_value=10.0
@@ -530,10 +637,26 @@ class CameraGizmo(Node):
         else:
             self.target_frame.visible = False
             self.gui_gap.value = self.gui_lag.value = ""
+        if self.error_log:
+            mm = np.array([e[1] for e in self.error_log])
+            deg = np.array([e[2] for e in self.error_log])
+            self.gui_track.value = (
+                f"mean {mm.mean():.1f} max {mm.max():.1f} mm | mean {deg.mean():.2f} deg"
+            )
+        else:
+            self.gui_track.value = ""
+        self.gui_offset.value = (
+            f"{np.linalg.norm(self.i_pos) * 1e3:.1f} mm  {np.degrees(np.linalg.norm(self.i_rot)):.2f} deg"
+        )
         c = self.clamped
         self.gui_clamps.value = (
             f"speed {c['speed']} rot {c['rot']} err {c['error']} box {c['box']} | pub {self.published}"
         )
+
+
+def _cap(vector: np.ndarray, limit: float) -> np.ndarray:
+    norm = float(np.linalg.norm(vector))
+    return vector * (limit / norm) if norm > limit else vector
 
 
 def _wxyz(rotation: Rotation) -> tuple[float, float, float, float]:
@@ -564,6 +687,13 @@ def main(argv: list[str] | None = None) -> int:
     # The force bound: 1300 N/m (config/controllers.yaml) x 0.03 m = 39 N.
     parser.add_argument("--max-error-m", type=float, default=0.03)
     parser.add_argument("--max-error-deg", type=float, default=10.0)
+    # The integral's cap: what it is there to absorb is ~3 mm of payload sag plus stiction, so
+    # 15 mm is room for that with margin, and small against the 30 mm force bound it sits under.
+    parser.add_argument("--max-integral-mm", type=float, default=15.0)
+    parser.add_argument("--max-integral-deg", type=float, default=5.0)
+    # Inside this the integral does not accumulate: stiction plus an integrator is a limit cycle.
+    parser.add_argument("--deadband-mm", type=float, default=0.5)
+    parser.add_argument("--deadband-deg", type=float, default=0.2)
     # A box for the CAMERA, around its home position (0.678, -0.002, 0.455) in lbr_link_0 at
     # kuka_crisp.HOME_DEGREES. Not the reachable workspace, and not measured against the table:
     # lower --workspace-min z only after looking at where the table is.
