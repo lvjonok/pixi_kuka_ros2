@@ -95,20 +95,59 @@ def make_kuka_robot(namespace: str = "lbr", **kwargs) -> Robot:
 
 
 def safe_switch(robot: Robot, controller_name: str) -> bool | None:
-    """Switch controllers while holding the FRI passthrough and wrench interface active.
+    """Switch controllers without ever leaving the arm unheld.
 
-    Raises RuntimeError if the passthrough is not active to begin with: activating
-    a torque overlay without it is the failure mode we are guarding against.
+    Two resting pairs exist, and a switch between them is ONE strict switch:
+
+    * REST: joint_trajectory_controller + zero_effort_controller. The trajectory controller
+      holds a FIXED position setpoint, so Sunrise's 200 Nm/rad joint impedance carries the
+      arm. This is what the stack starts in (launch/crisp_hardware.launch.py) and where
+      --home leaves it.
+    * ARMED: fri_position_passthrough_controller + a torque overlay (the CRISP controllers).
+      The passthrough mirrors the measured position, so Sunrise contributes nothing and the
+      overlay holds the arm.
+
+    passthrough + zero_effort -- the old resting state -- holds NOTHING: Sunrise's spring is
+    centred on where the arm already is. The bare arm sagged in it (17 Sep 2026); with the UMI
+    on and undeclared, 21 Sep 2026, it fell as soon as the stack came up. Switching to
+    zero_effort from an armed state therefore goes to REST, never to that pair.
     """
     controllers = robot.controller_switcher_client.get_controller_list()
     active = {c.name for c in controllers if c.state == "active"}
 
-    if "fri_position_passthrough_controller" not in active:
+    if TRAJECTORY in active:
+        if controller_name in TORQUE_CONTROLLERS:
+            # REST -> ARMED in one step: the overlay and the passthrough take over at the same
+            # control cycle the fixed setpoint and the zero overlay are released.
+            strict_switch(
+                robot,
+                activate=[PASSTHROUGH, controller_name],
+                deactivate=[TRAJECTORY, ZERO_EFFORT],
+            )
+            return True
+        if controller_name == ZERO_EFFORT:
+            return True  # already at rest
         raise RuntimeError(
-            "fri_position_passthrough_controller is not active. Refusing to switch: "
-            "a CRISP torque overlay without it leaves the FRI position setpoint stale. "
+            f"refusing to switch to {controller_name} from rest: only a torque overlay "
+            f"({TORQUE_CONTROLLERS}) or {ZERO_EFFORT} is meaningful here"
+        )
+
+    if PASSTHROUGH not in active:
+        raise RuntimeError(
+            "neither fri_position_passthrough_controller nor joint_trajectory_controller is "
+            "active, so nothing owns the FRI position command. Refusing to switch. "
             f"Active controllers were: {sorted(active)}"
         )
+
+    if controller_name == ZERO_EFFORT:
+        # ARMED -> REST: the trajectory controller activates holding the measured position.
+        overlays = sorted(set(TORQUE_CONTROLLERS) & active)
+        strict_switch(
+            robot,
+            activate=[TRAJECTORY, ZERO_EFFORT],
+            deactivate=[PASSTHROUGH, *overlays],
+        )
+        return True
 
     return robot.controller_switcher_client.switch_controller(
         controller_name,
@@ -199,10 +238,10 @@ def move_to_home(
     check_within_limits(target)
 
     active = active_controllers(robot)
-    if PASSTHROUGH not in active:
+    if PASSTHROUGH not in active and TRAJECTORY not in active:
         raise RuntimeError(
-            f"{PASSTHROUGH} is not active, so the FRI session is not in a state to be "
-            f"handed the position command. Active controllers were: {sorted(active)}"
+            f"neither {PASSTHROUGH} nor {TRAJECTORY} is active, so the FRI session is not in a "
+            f"state to be handed the position command. Active controllers were: {sorted(active)}"
         )
     if ZERO_EFFORT not in active:
         raise RuntimeError(
@@ -224,17 +263,16 @@ def move_to_home(
         f"largest joint delta {delta:.1f} deg, moving over {duration:.1f} s at {speed_deg_s} deg/s"
     )
 
-    strict_switch(robot, activate=[TRAJECTORY], deactivate=[PASSTHROUGH])
-    try:
-        robot.joint_trajectory_controller_client.send_joint_config(
-            robot.config.joint_names,
-            list(np.deg2rad(target)),
-            duration,
-            blocking=True,
-        )
-    finally:
-        # Hand the position command back to the passthrough whatever happened,
-        # including a rejected or aborted goal. Leaving the trajectory controller
-        # active would keep the FRI setpoint at its last commanded value rather
-        # than at the measured position.
-        strict_switch(robot, activate=[PASSTHROUGH], deactivate=[TRAJECTORY])
+    if TRAJECTORY not in active:
+        strict_switch(robot, activate=[TRAJECTORY], deactivate=[PASSTHROUGH])
+    # The trajectory controller is NOT handed back to the passthrough afterwards, whatever
+    # happens. It used to be, and that left passthrough + zero_effort: a setpoint that follows
+    # the measured position, so nothing holds the arm (see safe_switch). Staying here is REST:
+    # the arm holds at its last commanded setpoint -- home, or wherever an aborted goal stopped
+    # -- until safe_switch arms an overlay in one step.
+    robot.joint_trajectory_controller_client.send_joint_config(
+        robot.config.joint_names,
+        list(np.deg2rad(target)),
+        duration,
+        blocking=True,
+    )

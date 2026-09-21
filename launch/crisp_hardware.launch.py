@@ -86,7 +86,14 @@ def generate_launch_description() -> LaunchDescription:
             "estimated_wrench_interface",
             "lbr_state_broadcaster",
             "force_torque_broadcaster",
-            "fri_position_passthrough_controller",
+            # REST, not passthrough + zero effort. The trajectory controller activates holding
+            # the MEASURED position (the LBR interface NaNs its commands on activation, so it
+            # reads the state), and that fixed setpoint is what Sunrise's 200 Nm/rad joint
+            # impedance holds the arm at. The passthrough mirrors the measured position instead,
+            # so with it the arm is held by nothing: on 21 Sep 2026, with the UMI on and not
+            # declared to Sunrise, the arm fell as soon as the stack came up.
+            # scripts/kuka_crisp.py::safe_switch arms an overlay from here in one strict switch.
+            "joint_trajectory_controller",
             "zero_effort_controller",
             "pose_broadcaster",
             "twist_broadcaster",
@@ -108,10 +115,10 @@ def generate_launch_description() -> LaunchDescription:
             "--inactive",
             "cartesian_impedance_controller",
             "joint_impedance_controller",
-            # Loaded inactive because it claims the same position command
-            # interfaces as fri_position_passthrough_controller. Activating it
-            # is a deliberate, strict swap; see scripts/kuka_crisp.py.
-            "joint_trajectory_controller",
+            # Loaded inactive because it claims the same position command interfaces as
+            # joint_trajectory_controller, which owns them at rest. It comes in together with
+            # a torque overlay, in one strict swap; see scripts/kuka_crisp.py::safe_switch.
+            "fri_position_passthrough_controller",
         ],
     )
 

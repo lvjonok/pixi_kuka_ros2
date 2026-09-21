@@ -10,13 +10,14 @@ is activated.
     pixi run -e jazzy session --switch zero_effort_controller
 
 --home is the only option here that moves the robot. It runs in T1 with the
-enabling switch held, through kuka_crisp.move_to_home: a strict swap of the
-position command interfaces to joint_trajectory_controller, a slow point-to-
-point move with the zero torque overlay still owned, then a strict swap back.
+enabling switch held, through kuka_crisp.move_to_home: a slow point-to-point
+move through joint_trajectory_controller with the zero torque overlay owned,
+after which the arm STAYS there, held at the home setpoint (REST).
 
-Switching goes through kuka_crisp.safe_switch, which keeps
-fri_position_passthrough_controller and estimated_wrench_interface active and
-refuses to switch at all if the passthrough is not already active. Do not call
+Switching goes through kuka_crisp.safe_switch: from REST (trajectory + zero
+effort) to a torque overlay is one strict switch that also swaps in the
+passthrough, and back again to zero effort returns to REST, never to
+passthrough + zero effort, which holds nothing. Do not call
 robot.controller_switcher_client.switch_controller directly: it drops every
 active controller that is not named "*broadcaster".
 """
@@ -40,7 +41,9 @@ from kuka_crisp import (
     safe_switch,
 )
 
-GATE = "fri_position_passthrough_controller"
+#: Something must own the FRI position command: the passthrough when armed, the trajectory
+#: controller at rest. The stack starts at rest (launch/crisp_hardware.launch.py).
+GATE = ("fri_position_passthrough_controller", "joint_trajectory_controller")
 
 
 def main() -> int:
@@ -87,7 +90,8 @@ def main() -> int:
         )
         print(f"  {mark} {controller.name}")
 
-    print(f"\nGATE {GATE}: {'PASS' if GATE in active else 'FAIL'}")
+    owner = [g for g in GATE if g in active]
+    print(f"\nGATE position owner: {owner[0] if owner else 'NONE'} -> {'PASS' if owner else 'FAIL'}")
 
     q = np.asarray(robot.joint_values, dtype=float)
     print("\njoint positions [deg]:", np.array2string(np.rad2deg(q), precision=1))
@@ -103,8 +107,8 @@ def main() -> int:
     print("\nEE position [m]:", np.array2string(np.asarray(pose.position), precision=3))
 
     if args.home:
-        if GATE not in active:
-            print(f"\nrefusing to move: {GATE} is not active.")
+        if not set(GATE) & active:
+            print(f"\nrefusing to move: none of {GATE} is active.")
             robot.shutdown()
             return 1
         # Switch to zero-effort here, in the SAME process, immediately before moving. It is a
@@ -114,7 +118,8 @@ def main() -> int:
         # The arm relaxes and sags in that gap. It did, on 17 Sep 2026, with a human waiting to
         # type the second command. The two are one operation and this is where they join.
         if ZERO_EFFORT not in active_controllers(robot):
-            print(f"\nswitching to {ZERO_EFFORT} and moving immediately (no pause: the arm sags)")
+            # From an armed state this goes to REST (trajectory + zero effort), which holds.
+            print(f"\nswitching to {ZERO_EFFORT} (rest, held by the trajectory controller)")
             safe_switch(robot, ZERO_EFFORT)
         print("\nmoving to home. Keep the enabling switch held.")
         move_to_home(robot, speed_deg_s=args.speed)
@@ -132,8 +137,8 @@ def main() -> int:
                 print(f"  ACTIVE   {controller.name}")
 
     if args.switch:
-        if GATE not in active:
-            print(f"\nrefusing to switch: {GATE} is not active.")
+        if not set(GATE) & active:
+            print(f"\nrefusing to switch: none of {GATE} is active.")
             robot.shutdown()
             return 1
         print(f"\nswitching to {args.switch} ...")

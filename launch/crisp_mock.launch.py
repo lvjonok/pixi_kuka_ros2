@@ -64,7 +64,8 @@ def generate_launch_description() -> LaunchDescription:
             "--controller-manager",
             "controller_manager",
             "joint_state_broadcaster",
-            "fri_position_passthrough_controller",
+            # Same REST as crisp_hardware.launch.py: trajectory + zero effort.
+            "joint_trajectory_controller",
             "zero_effort_controller",
             "pose_broadcaster",
             "twist_broadcaster",
@@ -82,7 +83,7 @@ def generate_launch_description() -> LaunchDescription:
             "--inactive",
             "cartesian_impedance_controller",
             "joint_impedance_controller",
-            "joint_trajectory_controller",
+            "fri_position_passthrough_controller",
         ],
     )
 
