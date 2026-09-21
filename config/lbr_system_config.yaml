@@ -19,7 +19,13 @@ command_guard:
   variant: safe_stop
 
 state_guard:
-  external_torque_safety_check: true
+  # DISABLED 21 Sep 2026 for the UMI half of the bare-vs-UMI corpus, by the operator's choice.
+  # The UMI is deliberately NOT declared to Sunrise (payload must be the only variable between the
+  # bare and loaded sessions), so its weight reads as external torque: A2 3.96 Nm at activation
+  # against the 2.0 Nm limit, and the node aborts. The limit is one scalar for all seven joints
+  # (system_interface.cpp:37). Nothing is checked at activation while this is false -- a hand on
+  # the arm or a snagged cable goes unnoticed. SET IT BACK TO true when the UMI comes off.
+  external_torque_safety_check: false
   external_torque_limit: 2.0
 
 external_torque_tau: 0.01
