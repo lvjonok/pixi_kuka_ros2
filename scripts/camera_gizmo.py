@@ -694,11 +694,13 @@ def main(argv: list[str] | None = None) -> int:
     # Inside this the integral does not accumulate: stiction plus an integrator is a limit cycle.
     parser.add_argument("--deadband-mm", type=float, default=0.5)
     parser.add_argument("--deadband-deg", type=float, default=0.2)
-    # A box for the CAMERA, around its home position (0.678, -0.002, 0.455) in lbr_link_0 at
-    # kuka_crisp.HOME_DEGREES. Not the reachable workspace, and not measured against the table:
-    # lower --workspace-min z only after looking at where the table is.
-    parser.add_argument("--workspace-min", type=float, nargs=3, default=[0.40, -0.35, 0.25])
-    parser.add_argument("--workspace-max", type=float, nargs=3, default=[0.90, 0.35, 0.75])
+    # A box for the CAMERA in lbr_link_0, around the policy-eval home captured 21 Sep 2026
+    # (lerobot_pickplace configs/home.kuka.json, camera at 0.518, -0.432, 0.512). The floor is
+    # measured: the table is at z 0.276 under the camera (D405 depth, RANSAC plane, 1.9 mm rms)
+    # and the tweezer tips hang 137 mm below the camera there, so z 0.425 keeps them >= 7 mm
+    # off the table. Same box as lerobot_pickplace configs/deploy.kuka.yaml; keep them equal.
+    parser.add_argument("--workspace-min", type=float, nargs=3, default=[0.30, -0.70, 0.425])
+    parser.add_argument("--workspace-max", type=float, nargs=3, default=[0.75, -0.20, 0.70])
     args = parser.parse_args(argv)
 
     rclpy.init()
