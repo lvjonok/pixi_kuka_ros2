@@ -360,26 +360,29 @@
     # is the whole controller: tau = k*w*(q_ref - q) + d*w*(dq_ref - dq), with
     # the same weight vector scaling both.
     #
-    # Per-joint stiffness is stiffness * weight: 20, 20, 15, 15, 8, 5, 3 Nm/rad.
+    # Per-joint stiffness is stiffness * weight: 100, 100, 75, 75, 40, 25, 15 Nm/rad.
     #
     # Damping is set explicitly. Left at -1, CRISP computes 2*sqrt(k_j), which
     # assumes an inertia of 1 kg m^2 at every joint. The iiwa14's proximal
     # joints carry roughly 4-5 kg m^2 and its distal ones under 0.5, so the
     # auto value under-damps A1-A4 by more than a factor of two. Critical
     # damping is 2*sqrt(k_j * I_j), which for A1 at 20 Nm/rad and ~5 kg m^2 is
-    # about 20 rather than the 8.9 the formula gives.
+    # about 45 at 100 Nm/rad rather than the 20 the formula gives.
     #
-    # damping * weight = 20, 20, 15, 15, 8, 5, 3 N m s/rad, so the proximal
-    # joints land near critical and the distal ones are deliberately
-    # overdamped. They carry little inertia and are where measurement noise is
-    # worst.
+    # damping * weight = 40, 40, 30, 30, 16, 10, 6 N m s/rad, so the proximal
+    # joints land near critical (A1 zeta ~0.9) and the distal ones are
+    # deliberately overdamped. They carry little inertia and are where
+    # measurement noise is worst.
     #
-    # Unlike the Cartesian case this is a renderable impedance: 20 Nm/rad is an
-    # order of magnitude softer than Sunrise's 200 Nm/rad joint impedance
-    # underneath, so the series compliance is not the binding constraint.
+    # 100 Nm/rad is half of Sunrise's 200 Nm/rad joint impedance underneath (was
+    # an order of magnitude below it at 20); not yet checked for series-compliance
+    # effects on hardware.
     nullspace:
-      stiffness: 1.0
-      damping: 1.0
+      # 5.0 x weights = 100/100/75/75/40/25/15 Nm/rad (was 1.0: 20 Nm/rad on A1, and the arm
+      # lagged the reference by 1.2-1.5 s and 20 deg at 0.3 rad/s -- friction, not the spring,
+      # set the motion; next shakedown, 22 Sep 2026). Damping 2.0 x weights.
+      stiffness: 5.0
+      damping: 2.0
       projector_type: none
       max_tau: 20.0
       weights:
