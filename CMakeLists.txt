@@ -37,5 +37,6 @@ install(TARGETS pixi_kuka_fri_controllers
   RUNTIME DESTINATION bin
 )
 install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
+install(PROGRAMS scripts/kuka_ext_torque_relay.py DESTINATION lib/${PROJECT_NAME})
 
 ament_package()

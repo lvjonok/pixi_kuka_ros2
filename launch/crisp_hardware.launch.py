@@ -122,6 +122,15 @@ def generate_launch_description() -> LaunchDescription:
         ],
     )
 
+    # KUKA's external-torque estimate as a plain JointState (<ns>/kuka_external_torque), for
+    # recorders without lbr_fri_idl. Reads lbr_state from lbr_state_broadcaster above.
+    ext_torque_relay = Node(
+        package="pixi_kuka_ros2",
+        executable="kuka_ext_torque_relay.py",
+        namespace=namespace,
+        output="screen",
+    )
+
     return LaunchDescription(
         [
             DeclareLaunchArgument("namespace", default_value="lbr"),
@@ -129,5 +138,6 @@ def generate_launch_description() -> LaunchDescription:
             controller_manager,
             active_controllers,
             inactive_crisp_controllers,
+            ext_torque_relay,
         ]
     )
