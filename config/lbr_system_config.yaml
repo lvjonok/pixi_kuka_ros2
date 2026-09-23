@@ -19,9 +19,10 @@ command_guard:
   variant: safe_stop
 
 state_guard:
-  # Bare flange. An undeclared tool trips this at activation (the UMI read 3.96 Nm on A2); the
-  # flag is ignored upstream (async_client.cpp:129), so only raising the limit disables it --
-  # see 851cc47 / 3ed7e0b and branch feat/umi-camera-frame.
+  # Checked once, when FRI starts commanding (async_client.cpp:129), never during motion. A tool
+  # passes only with its load declared in Sunrise and attached in LBRServer: the UMI undeclared
+  # read 3.96 Nm on A2 here, and the arm sagged under the impedance controllers. Declare the
+  # load; do not raise this. (The flag is ignored upstream; only the limit acts.)
   external_torque_safety_check: true
   external_torque_limit: 2.0
 
