@@ -77,7 +77,7 @@ touch "${crisp_py_dir}/COLCON_IGNORE"
 # branch would move the camera frame under a running experiment with nothing to show for it.
 # Upstream lbr_ros2_control's iiwa14.xacro stays the default description (tool:=none).
 iris_dir="src/iris_robots_description"
-iris_rev="${IRIS_DESCRIPTION_REV:-9eef1e6}"
+iris_rev="${IRIS_DESCRIPTION_REV:-535fee1}"
 if [[ ! -d "${iris_dir}/.git" ]]; then
     git clone git@github.com:KAIST-IRiS-Haptics-Telerobotics/iris_robots_description.git "${iris_dir}"
     git -C "${iris_dir}" checkout --quiet "${iris_rev}"

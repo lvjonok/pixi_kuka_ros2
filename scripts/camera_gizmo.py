@@ -28,7 +28,7 @@ defaults because a mouse can jump a gizmo a metre in one event:
   under impedance.
 
 Two corrections, off until ticked under "correction", for the ~1 cm the arm trails by: an
-integral that absorbs the static offset (undeclared UMI weight, stiction), and a velocity lead of
+integral that absorbs the static offset (stiction, load-data error), and a velocity lead of
 (D/K) v that cancels the damping drag while moving. Both are added AFTER the walk and BEFORE the
 bounds above, so neither can push past the force bound or the box. "gizmo - arm, 2 s" is the
 number to compare with them on and off.
@@ -350,9 +350,10 @@ class CameraGizmo(Node):
     def _correct(self, reference: Pose, previous: Pose, measured: Pose) -> Pose:
         """The two client-side corrections, both off unless ticked.
 
-        integral: the arm stops SHORT of a static target -- the UMI's ~0.4 kg is declared to
-        neither Sunrise nor crisp (~3 mm at 1300 N/m), and stiction holds the proximal joints
-        (A1 breaks away near 8 Nm). crisp has no integral term, so this integrates the
+        integral: the arm stops SHORT of a static target -- stiction holds the proximal joints
+        (A1 breaks away near 8 Nm), and whatever the UMI's declared load data gets wrong is left
+        on the spring. (Undeclared, its ~0.4 kg sagged ~3 mm at 1300 N/m; the ~1 cm trail this
+        was built against was measured then.) crisp has no integral term, so this integrates the
         reference-to-arm error into an offset on what is sent. A deadband keeps it from hunting
         on stiction, a cap bounds it, and it freezes while the output is being force-clamped.
 
@@ -687,7 +688,7 @@ def main(argv: list[str] | None = None) -> int:
     # The force bound: 1300 N/m (config/controllers.yaml) x 0.03 m = 39 N.
     parser.add_argument("--max-error-m", type=float, default=0.03)
     parser.add_argument("--max-error-deg", type=float, default=10.0)
-    # The integral's cap: what it is there to absorb is ~3 mm of payload sag plus stiction, so
+    # The integral's cap: what it is there to absorb is stiction plus load-data error, a few mm, so
     # 15 mm is room for that with margin, and small against the 30 mm force bound it sits under.
     parser.add_argument("--max-integral-mm", type=float, default=15.0)
     parser.add_argument("--max-integral-deg", type=float, default=5.0)

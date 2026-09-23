@@ -161,7 +161,8 @@ or whose controllers are on another frame, and disengages if `/lbr/current_pose`
 agreeing with its own FK of `lbr_umi_camera`. `--dry-run` does everything but publish.
 
 Under **correction**, two client-side fixes for the arm trailing the target, both off by
-default: an integral for the static offset (the undeclared UMI's sag and stiction), and a
+default: an integral for the static offset (stiction, and whatever the declared load data gets
+wrong; the UMI must be declared in Sunrise and attached in LBRServer), and a
 velocity lead of (D/K)·v, read off the live controller's gains, for the damping drag while
 moving. Compare them with **gizmo - arm, 2 s**.
 
