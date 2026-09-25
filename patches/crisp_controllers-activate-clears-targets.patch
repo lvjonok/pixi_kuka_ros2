@@ -1,0 +1,70 @@
+From 87f4c08fbc70cdd17f04b47e53d4fcc3574906e8 Mon Sep 17 00:00:00 2001
+From: Lev Kozlov <kozlov.l.a10@gmail.com>
+Date: Fri, 25 Sep 2026 17:35:10 +0900
+Subject: [PATCH] fix: on_activate drops targets that arrived while inactive
+
+The target subscriptions live from on_configure and the new_target_* flags were
+cleared only there, so a target published while the controller was inactive
+(crisp_py's Robot publishes pose and joints at 50 Hz, e.g. during a homing run on
+joint_trajectory_controller) survived activation and replaced the freshly latched
+measured pose on the first update. On a KUKA iiwa (25 Sep 2026) that yanked the
+arm back to its pre-homing pose until FRI's velocity guard dropped the session.
+Both Cartesian controllers now clear the pose/joint/wrench flags and zero the
+wrench target on activation.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01PYsbnsZbpqrrGZhLJYaMks
+---
+ src/cartesian_admittance_controller.cpp | 12 ++++++++++++
+ src/cartesian_controller.cpp            | 12 ++++++++++++
+ 2 files changed, 24 insertions(+)
+
+diff --git a/src/cartesian_admittance_controller.cpp b/src/cartesian_admittance_controller.cpp
+index e58013d..e081ceb 100644
+--- a/src/cartesian_admittance_controller.cpp
++++ b/src/cartesian_admittance_controller.cpp
+@@ -789,6 +789,18 @@ CartesianAdmittanceController::on_activate(const rclcpp_lifecycle::State & /*pre
+   desired_position_ = target_position_;
+   desired_orientation_ = target_orientation_;
+ 
++  // Drop every target that arrived while the controller was inactive. The subscriptions live
++  // from on_configure, so a client that published before this activation (crisp_py's Robot
++  // publishes its target pose and joints at 50 Hz, e.g. during a homing run on another
++  // controller) leaves new_target_* set, and the first update() would replace the measured
++  // pose just latched above with a pose the arm has since left. On a KUKA iiwa on 25 Sep 2026
++  // that yanked the arm back to its pre-homing pose on activation, until FRI's velocity guard
++  // dropped the session.
++  new_target_pose_ = false;
++  new_target_joint_ = false;
++  new_target_wrench_ = false;
++  target_wrench_.setZero();
++
+   // Reset admittance state so it reinitializes on first update cycle
+   admittance_initialized_ = false;
+   inner_motion_.setZero();
+diff --git a/src/cartesian_controller.cpp b/src/cartesian_controller.cpp
+index 56062e7..212a84c 100644
+--- a/src/cartesian_controller.cpp
++++ b/src/cartesian_controller.cpp
+@@ -676,6 +676,18 @@ CartesianController::on_activate(const rclcpp_lifecycle::State & /*previous_stat
+   desired_position_ = target_position_;
+   desired_orientation_ = target_orientation_;
+ 
++  // Drop every target that arrived while the controller was inactive. The subscriptions live
++  // from on_configure, so a client that published before this activation (crisp_py's Robot
++  // publishes its target pose and joints at 50 Hz, e.g. during a homing run on another
++  // controller) leaves new_target_* set, and the first update() would replace the measured
++  // pose just latched above with a pose the arm has since left. On a KUKA iiwa on 25 Sep 2026
++  // that yanked the arm back to its pre-homing pose on activation, until FRI's velocity guard
++  // dropped the session.
++  new_target_pose_ = false;
++  new_target_joint_ = false;
++  new_target_wrench_ = false;
++  target_wrench_.setZero();
++
+   RCLCPP_INFO(get_node()->get_logger(), "Controller activated.");
+   return CallbackReturn::SUCCESS;
+ }
+-- 
+2.43.0
+

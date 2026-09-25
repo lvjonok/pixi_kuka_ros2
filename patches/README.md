@@ -40,3 +40,27 @@ git -C src/crisp_controllers am < patches/crisp_controllers-introspection.patch
 pixi run -e jazzy colcon build --base-paths . src --packages-select crisp_controllers \
   --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
 ```
+
+## crisp_controllers-activate-clears-targets.patch
+
+Applies on top of the introspection patch (upstream `0279dc8` + `fd64d0a` + `006d34a`).
+
+**Safety.** The target subscriptions live from `on_configure`, and the `new_target_*` flags were
+cleared only there. A target published while the controller was inactive therefore survived
+activation and replaced the measured pose `on_activate` had just latched, on the first
+`update()`. `crisp_session.py --home` runs a crisp_py `Robot`, which publishes its target pose and
+joints at 50 Hz from the pose it STARTED at; arming the Cartesian controller after homing then
+yanked the arm back to its pre-homing pose. On 25 Sep 2026 that hit FRI's velocity guard on A2
+within milliseconds of activation and dropped the session with the camera 37 cm lower.
+
+Both `CartesianController` and `CartesianAdmittanceController` now clear the pose, joint and
+wrench flags and zero the wrench target in `on_activate`. A target that arrives after
+activation is a real command and is applied as before.
+
+Re-apply after a fresh import, after the introspection patch:
+
+```bash
+git -C src/crisp_controllers am < patches/crisp_controllers-activate-clears-targets.patch
+pixi run -e jazzy colcon build --base-paths . src --packages-select crisp_controllers \
+  --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+```
