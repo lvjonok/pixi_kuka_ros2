@@ -15,8 +15,33 @@
 # the camera to where it meant the flange -- a 90 mm displacement and a 25 deg rotation that no
 # check of theirs can see. Excitation and teleop sessions run with tool:=none.
 #
-# The wrench estimator stays on lbr_link_ee: it is a KDL chain in the arm's own terms and its
-# consumers (force_torque_broadcaster, iiwa_next) read it there.
+# The wrench estimator ends at the tweezer blade tips (25 Sep 2026), for the Haply's force
+# feedback through lerobot_robot_crisp: contact happens there, so a KDL chain ending there
+# splits tau_ext into force and moment about the point that is actually touched.
+# `lbr_umi_tweezer_tip` is fixed to lbr_umi_camera with the SAME orientation (iris_robots_description
+# umi_gripper.xacro), so the force can be rotated into the base by the measured camera pose;
+# lerobot_pickplace's kuka_cell readback checks that the two frames share axes. iiwa_next records
+# excitation with tool:=none and never loads this overlay.
+#
+# The per-axis force thresholds are a dead-zone the estimator applies BEFORE any bias a consumer
+# subtracts, so at 2 N a 3 N contact reads 1 N and a 1.9 N one reads nothing. The dead-zone belongs
+# after the bias, in the consumer (the Haply's deadband_n). Force only: the Haply renders 3 DoF,
+# and the torque thresholds stay controllers.yaml's.
+#
+# `damping` stays controllers.yaml's 0.2 until lerobot_pickplace runbook S2.4 measures it (a 10 mm
+# press into a rigid block should read ~13 N; 0.2 is expected ~30 % low).
+/**/estimated_wrench_interface:
+  ros__parameters:
+    wrench_estimator:
+      chain_tip: lbr_umi_tweezer_tip
+      force_x_th: 0.0
+      force_y_th: 0.0
+      force_z_th: 0.0
+
+/**/force_torque_broadcaster:
+  ros__parameters:
+    frame_id: lbr_umi_tweezer_tip
+
 /**/pose_broadcaster:
   ros__parameters:
     end_effector_frame: lbr_umi_camera
