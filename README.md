@@ -166,3 +166,12 @@ wrong; the UMI must be declared in Sunrise and attached in LBRServer), and a
 velocity lead of (D/K)·v, read off the live controller's gains, for the damping drag while
 moving. Compare them with **gizmo - arm, 2 s**.
 
+`pixi run -e jazzy contact-view` (port 8098) is read-only — it publishes nothing and switches
+no controller, so it runs beside anything. It draws the estimated contact force as an arrow at
+the frame in the wrench's header (`lbr_umi_tweezer_tip`), rotated into `lbr_link_0` by its own
+FK of that frame, with the numbers in base and tip axes, a low-pass, a **zero bias** (base axes,
+as the Haply's force step subtracts it) and a 10 s plot of |F|; and `tau_ext` per joint
+(`/lbr/kuka_external_torque`) as a sphere sized by magnitude and an arrow along the joint axis,
+which shows where along the arm a load is felt when contact is not at the tips. A header frame
+not in the description is refused on the page, and anything older than 0.5 s is greyed.
+

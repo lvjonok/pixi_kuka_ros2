@@ -51,6 +51,8 @@ mock-umi = "env CYCLONEDDS_URI=file://$PWD/config/cyclonedds_loopback.xml ros2 l
 controllers = "ros2 control list_controllers -c /lbr/controller_manager"
 interfaces = "ros2 control list_hardware_interfaces -c /lbr/controller_manager"
 session = "env CYCLONEDDS_URI=file://$PWD/config/cyclonedds_loopback.xml python scripts/crisp_session.py"
+# Read-only viser page: the estimated contact force at the tweezer tips and tau_ext per joint.
+contact-view = "python scripts/contact_view.py"
 
 [feature.dev.pypi-dependencies]
 crisp-python = ">=3.0.0,<4"
