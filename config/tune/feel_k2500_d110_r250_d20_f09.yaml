@@ -1,0 +1,13 @@
+# Teleop feel test after s4_r300_d10 felt erratic and tripped A4 on a rapid stroke (26 Sep 2026):
+# the damping sweep 5 removed (LBRServer 0.7 -> 0.3, crisp d 84 -> 60, d_rot 20 -> 10) given back
+# in crisp, and the 30 Hz target steps (up to 8 mm) ramped over ~20 ms by the target filter
+# (EMA weight on the PREVIOUS value, per 2 ms cycle; 0.1 at launch). Predicted lag ~85 / ~100 ms.
+/lbr/cartesian_impedance_controller:
+  ros__parameters:
+    variable_max_stiffness: {translational: 2500.0, rotational: 1000.0}
+    task:
+      {k_pos_x: 2500.0, k_pos_y: 2500.0, k_pos_z: 2500.0, d_pos_x: 110.0, d_pos_y: 110.0, d_pos_z: 110.0,
+       k_rot_x: 250.0, k_rot_y: 250.0, k_rot_z: 250.0, d_rot_x: 20.0, d_rot_y: 20.0, d_rot_z: 20.0}
+    nullspace: {stiffness: 30.0, damping: 11.0}
+    filter: {target_pose: 0.9}
+  replay: {lead: false, max_error_m: null}

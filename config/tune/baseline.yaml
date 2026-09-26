@@ -6,4 +6,5 @@
       {k_pos_x: 1300.0, k_pos_y: 1300.0, k_pos_z: 1300.0, d_pos_x: 84.0, d_pos_y: 84.0, d_pos_z: 84.0,
        k_rot_x: 100.0, k_rot_y: 100.0, k_rot_z: 100.0, d_rot_x: 20.0, d_rot_y: 20.0, d_rot_z: 20.0}
     nullspace: {stiffness: 30.0, damping: 11.0}
+    filter: {target_pose: 0.1}
   replay: {lead: false, max_error_m: null}
