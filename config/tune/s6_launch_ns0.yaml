@@ -1,0 +1,14 @@
+# Sweep 6 (26 Sep 2026): launch.yaml with the nullspace spring off (damping kept): does the posture
+# spring (30 Nm/rad toward the arming posture, 8-15 Nm on A3/A7 after teleop) hold the tool off target?
+# the damping sweep 5 removed (LBRServer 0.7 -> 0.3, crisp d 84 -> 60, d_rot 20 -> 10) given back
+# in crisp, and the 30 Hz target steps (up to 8 mm) ramped over ~20 ms by the target filter
+# (EMA weight on the PREVIOUS value, per 2 ms cycle; 0.1 at launch). Predicted lag ~85 / ~100 ms.
+/lbr/cartesian_impedance_controller:
+  ros__parameters:
+    variable_max_stiffness: {translational: 2500.0, rotational: 1000.0}
+    task:
+      {k_pos_x: 2500.0, k_pos_y: 2500.0, k_pos_z: 2500.0, d_pos_x: 140.0, d_pos_y: 140.0, d_pos_z: 140.0,
+       k_rot_x: 250.0, k_rot_y: 250.0, k_rot_z: 250.0, d_rot_x: 25.0, d_rot_y: 25.0, d_rot_z: 25.0}
+    nullspace: {stiffness: 0.0, damping: 11.0}
+    filter: {target_pose: 0.9}
+  replay: {lead: false, max_error_m: null}

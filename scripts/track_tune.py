@@ -276,6 +276,53 @@ def record(args: argparse.Namespace) -> int:
     return 0
 
 
+def steps(args: argparse.Namespace) -> int:
+    """Write a recording of small steps about where the arm stands now. Reads, moves nothing.
+
+    Each step: hold at the start pose, jump the target by a few mm (or a fraction of a degree)
+    along one base axis, hold, jump back. `replay` then drives it under each gains file and
+    `fine` scores the answer: the hold error left after each step (friction, or a torque the
+    spring is fighting) and the delay to half the step.
+    """
+    cell = Cell(publish=False)
+    deadline = time.monotonic() + 5.0
+    while cell.pose is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if cell.pose is None:
+        raise SystemExit("no /lbr/current_pose within 5 s -- is the cell up?")
+    _, p0, r0 = cell.pose
+    hold_s, dt = args.hold_s, 1.0 / RATE_HZ
+    seq: list[tuple[np.ndarray, Rotation]] = []
+
+    def hold(p: np.ndarray, r: Rotation) -> None:
+        seq.extend([(p, r)] * int(hold_s * RATE_HZ))
+
+    hold(p0, r0)
+    for axis in range(3):
+        for mm in args.mm:
+            for sign in (1, -1):
+                d = np.zeros(3)
+                d[axis] = sign * mm * 1e-3
+                hold(p0 + d, r0)
+                hold(p0, r0)
+    for axis in range(3):
+        for deg in args.deg:
+            for sign in (1, -1):
+                v = np.zeros(3)
+                v[axis] = np.radians(sign * deg)
+                hold(p0, Rotation.from_rotvec(v) * r0)
+                hold(p0, r0)
+    out = Path(args.out).expanduser()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w") as f:
+        for i, (p, r) in enumerate(seq):
+            f.write(json.dumps({"t": i * dt, "k": "target", "p": p.tolist(),
+                                "q": r.as_quat().tolist()}) + "\n")
+    print(f"wrote {out}: {len(seq) * dt:.0f} s of steps ({args.mm} mm, {args.deg} deg, "
+          f"hold {hold_s} s) about camera {np.round(p0, 4).tolist()}")
+    return 0
+
+
 # -- replay --------------------------------------------------------------------------------
 
 
@@ -663,6 +710,11 @@ def main() -> int:
     rec.add_argument("out")
     st = sub.add_parser("set", help="set one gains file on the live controller (moves nothing)")
     st.add_argument("gains")
+    stp = sub.add_parser("steps", help="write small steps about the current pose (moves nothing)")
+    stp.add_argument("out")
+    stp.add_argument("--mm", type=float, nargs="+", default=[1.0, 3.0])
+    stp.add_argument("--deg", type=float, nargs="+", default=[0.5, 2.0])
+    stp.add_argument("--hold-s", type=float, default=1.5)
     fn = sub.add_parser("fine", help="score a recording's small motions (no ROS, moves nothing)")
     fn.add_argument("recording")
     rep = sub.add_parser("replay", help="MOVES THE ARM: replay a recording under each gains file")
@@ -686,6 +738,8 @@ def main() -> int:
     try:
         if args.cmd == "set":
             return set_gains(args)
+        if args.cmd == "steps":
+            return steps(args)
         return record(args) if args.cmd == "record" else replay(args)
     finally:
         rclpy.try_shutdown()
