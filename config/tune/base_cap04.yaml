@@ -1,8 +1,8 @@
-# Launch gains (controllers.yaml + controllers_umi.yaml), no cap: the 26 Sep recording's surge. Also --restore.
+# Launch gains, target held within 40 mm of the arm (52 N at k 1300).
 /lbr/cartesian_impedance_controller:
   ros__parameters:
-    variable_max_stiffness: {translational: 1300.0, rotational: 100.0}
+    variable_max_stiffness: {translational: 2500.0, rotational: 100.0}
     task:
       {k_pos_x: 1300.0, k_pos_y: 1300.0, k_pos_z: 1300.0, d_pos_x: 84.0, d_pos_y: 84.0, d_pos_z: 84.0,
        k_rot_x: 100.0, k_rot_y: 100.0, k_rot_z: 100.0, d_rot_x: 20.0, d_rot_y: 20.0, d_rot_z: 20.0}
-  replay: {lead: false, max_error_m: null}
+  replay: {lead: false, max_error_m: 0.04}

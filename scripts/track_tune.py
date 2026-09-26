@@ -15,7 +15,15 @@ once per gains file, and scores each run against the same numbers:
 Why a lag exists at all: crisp damps against MEASURED velocity with the target's velocity
 taken as zero, so a target moving at v holds a steady-state error of (D/K) v behind it -- 65 ms
 at k_pos 1300 / d_pos 84. A gains file may set `replay: {lead: true}` to send each target
-(D/K) v ahead of itself (camera_gizmo.py's lead), which cancels that at constant speed.
+(D/K) v ahead of itself (camera_gizmo.py's lead), which cancels that at constant speed, and
+`replay: {max_error_m: 0.04}` to hold the target within that of the arm (crisp's
+max_ee_tracking_error, which a replay otherwise bypasses).
+
+The first recording (26 Sep 2026, baseline gains, cap 0.2 m) ended in a CommandGuard stop:
+the target never exceeded 0.24 m/s over 100 ms, but the arm fell 40-60 mm behind it and then
+surged to catch up, and A4 (75 deg/s, the lowest limit) reached 123 %. `arm_peak_mps` against
+`target_peak_mps` is that surge. The guard then latches: on a violation it returns without
+updating its previous position (command_guard.cpp), so every later sample fails against it.
 
     # 1. record, while the operator teleoperates (lerobot_pickplace `make teleop-arm`):
     pixi run -e jazzy python scripts/track_tune.py record ~/data/track/rec1.jsonl
@@ -99,6 +107,10 @@ class Cell(Node):
         self.q: np.ndarray | None = None
         self.dq: np.ndarray | None = None
         self.sink: Any = None  # callable(row) while recording
+        # lbr_fri_ros2's CommandGuard differentiates MEASURED positions over one FRI sample; the
+        # reported joint_states velocity is smoother and read 1.01 where that read 1.23 (26 Sep).
+        # The guard here uses the larger of the two, the difference taken over ~10 ms.
+        self.q_hist: list[tuple[float, np.ndarray]] = []
         self.create_subscription(
             PoseStamped, f"{NS}/current_pose", self._on_pose, qos_profile_sensor_data
         )
@@ -128,9 +140,14 @@ class Cell(Node):
         pos, vel = dict(zip(msg.name, msg.position)), dict(zip(msg.name, msg.velocity))
         if not all(n in pos for n in JOINT_NAMES):
             return
+        now = time.monotonic()
+        q = np.array([pos[n] for n in JOINT_NAMES])
+        reported = np.abs([vel.get(n, 0.0) for n in JOINT_NAMES])
         with self.lock:
-            self.q = np.array([pos[n] for n in JOINT_NAMES])
-            self.dq = np.array([vel.get(n, np.nan) for n in JOINT_NAMES])
+            self.q_hist = [*self.q_hist[-5:], (now, q)]
+            t_old, q_old = self.q_hist[0]
+            fd = np.abs(q - q_old) / (now - t_old) if now - t_old > 1e-3 else np.zeros(7)
+            self.q, self.dq = q, np.maximum(reported, fd)
         if self.sink:
             self.sink({"t": time.monotonic(), "k": "joints", "q": self.q.tolist(),
                        "dq": self.dq.tolist()})
@@ -305,7 +322,8 @@ def _approach(cell: Cell, args: argparse.Namespace, vlim: np.ndarray, p0: np.nda
 
 
 def _run(cell: Cell, args: argparse.Namespace, vlim: np.ndarray, t: np.ndarray, P: np.ndarray,
-         R: Rotation, lead: tuple[float, float] | None) -> list[dict[str, Any]]:
+         R: Rotation, lead: tuple[float, float] | None,
+         max_error_m: float | None) -> list[dict[str, Any]]:
     """Send the recorded targets on their own clock; log (sent, measured, dq) each tick."""
     log: list[dict[str, Any]] = []
     t0 = time.monotonic()
@@ -320,6 +338,13 @@ def _run(cell: Cell, args: argparse.Namespace, vlim: np.ndarray, t: np.ndarray, 
             w = (R[i] * R[i - 1].inv()).as_rotvec() / dt
             p = p + lead[0] * v
             r = Rotation.from_rotvec(lead[1] * w) * r
+        if max_error_m is not None:
+            # crisp's max_ee_tracking_error, which this replay bypasses otherwise.
+            with cell.lock:
+                _, mp0, _ = cell.pose
+            gap = p - mp0
+            if np.linalg.norm(gap) > max_error_m:
+                p = mp0 + gap * (max_error_m / np.linalg.norm(gap))
         mp, mr, dq = _guard(cell, args, vlim, p, r)
         cell.publish(p, r)
         log.append({"t": el, "ref_p": P[i].tolist(), "ref_q": R[i].as_quat().tolist(),
@@ -356,6 +381,13 @@ def score(log: list[dict[str, Any]], vlim: np.ndarray) -> dict[str, float]:
 
     rows = [shifted_rms(tau) for tau in grid]
     kp, kr = int(np.argmin([a for a, _ in rows])), int(np.argmin([b for _, b in rows]))
+
+    # Surge: the arm's fastest 100 ms against the target's. Above 1 the arm is catching up on
+    # a lag faster than it was asked to move -- how A4 passed its limit on 26 Sep.
+    def peak_speed(x: np.ndarray) -> float:
+        j = np.searchsorted(t, t + 0.1)
+        ok = j < len(t)
+        return float(np.max(np.linalg.norm(x[j[ok]] - x[ok], axis=1) / (t[j[ok]] - t[ok])))
     dq = np.array([row["dq"] for row in log if row["dq"] is not None])
     speed = np.nanmax(np.abs(dq) / vlim, axis=0) if len(dq) else np.full(7, np.nan)
     return {
@@ -367,6 +399,8 @@ def score(log: list[dict[str, Any]], vlim: np.ndarray) -> dict[str, float]:
         "rot_max_deg": float(e_r.max()),
         "rot_lag_ms": float(grid[kr] * 1e3),
         "rot_rms_after_lag_deg": rows[kr][1],
+        "arm_peak_mps": peak_speed(mp),
+        "target_peak_mps": peak_speed(ref_p),
         "peak_joint_speed_frac": float(np.nanmax(speed)),
         "peak_joint": JOINT_NAMES[int(np.nanargmax(speed))],
     }
@@ -407,13 +441,15 @@ def replay(args: argparse.Namespace) -> int:
             print(f"\n== {path.name}: {now} lead={lead}", flush=True)
             time.sleep(0.3)
             _approach(cell, args, vlim, P[0], R[0])
-            log = _run(cell, args, vlim, t, P, R, lead)
-            s = score(log, vlim) | {"gains_file": str(path), "gains": now, "lead": lead}
+            log = _run(cell, args, vlim, t, P, R, lead, options.get("max_error_m"))
+            s = score(log, vlim) | {"gains_file": str(path), "gains": now, "lead": lead,
+                                    "max_error_m": options.get("max_error_m")}
             results.append(s)
             (out / f"{path.stem}.jsonl").write_text("\n".join(json.dumps(r) for r in log))
             print("   " + "  ".join(f"{k} {v:.1f}" if isinstance(v, float) else f"{k} {v}"
                                      for k, v in s.items() if k not in ("gains", "gains_file",
-                                                                         "lead")), flush=True)
+                                                                         "lead", "max_error_m")),
+                  flush=True)
     except Abort as why:
         with cell.lock:
             _, mp, mr = cell.pose
@@ -446,7 +482,7 @@ def main() -> int:
     rep.add_argument("--floor-z", type=float, default=0.20)
     rep.add_argument("--abort-m", type=float, default=0.10)
     rep.add_argument("--abort-deg", type=float, default=30.0)
-    rep.add_argument("--abort-speed", type=float, default=0.7,
+    rep.add_argument("--abort-speed", type=float, default=0.6,
                      help="fraction of a joint's velocity limit that stops the sweep")
     args = parser.parse_args()
     rclpy.init()
