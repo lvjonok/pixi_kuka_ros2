@@ -379,6 +379,8 @@ def _approach(cell: Cell, args: argparse.Namespace, vlim: np.ndarray, p0: np.nda
     ang = float((r0 * sr.inv()).magnitude())
     duration = max(dist / 0.05, np.degrees(ang) / 15.0, 0.5)
     slerp = Slerp([0.0, 1.0], Rotation.concatenate([sr, r0]))
+    print(f"   approach: {dist * 1e3:.0f} mm, {np.degrees(ang):.1f} deg over {duration:.1f} s, "
+          f"then settle {args.settle_s:.1f} s", flush=True)
     t0 = time.monotonic()
     while (s := (time.monotonic() - t0) / duration) < 1.0:
         s = 0.5 - 0.5 * np.cos(np.pi * s)
@@ -399,6 +401,7 @@ def _run(cell: Cell, args: argparse.Namespace, vlim: np.ndarray, t: np.ndarray, 
     """Send the recorded targets on their own clock; append (sent, measured, dq) each tick."""
     t0 = time.monotonic()
     i = 0
+    shown = -1
     while (el := time.monotonic() - t0) <= t[-1]:
         while i + 1 < len(t) and t[i + 1] <= el:
             i += 1
@@ -421,6 +424,14 @@ def _run(cell: Cell, args: argparse.Namespace, vlim: np.ndarray, t: np.ndarray, 
         log.append({"t": el, "ref_p": P[i].tolist(), "ref_q": R[i].as_quat().tolist(),
                     "p": mp.tolist(), "q": mr.as_quat().tolist(),
                     "dq": None if dq is None else dq.tolist()})
+        # Once a second, so a run of millimetre steps is visibly alive: where the target is
+        # relative to the run's start, and how far the arm is from it.
+        if int(el) != shown:
+            shown = int(el)
+            print(f"   {el:5.1f}/{t[-1]:.0f} s  target {np.round((P[i] - P[0]) * 1e3, 1)} mm "
+                  f"{np.degrees((R[i] * R[0].inv()).magnitude()):.1f} deg  arm off by "
+                  f"{np.linalg.norm(P[i] - mp) * 1e3:.1f} mm "
+                  f"{np.degrees((R[i] * mr.inv()).magnitude()):.2f} deg", flush=True)
         time.sleep(1.0 / RATE_HZ)
 
 
@@ -637,12 +648,13 @@ def replay(args: argparse.Namespace) -> int:
                 if "stale" in str(why) or "another node" in str(why):
                     results.append({"gains_file": str(path), "aborted": aborted})
                     raise
+            finally:
+                (out / f"{path.stem}.jsonl").write_text("\n".join(json.dumps(r) for r in log))
             s = {"gains_file": str(path), "gains": now, "lead": lead,
                  "max_error_m": options.get("max_error_m"), "aborted": aborted}
             if len(log) > 50:
                 s |= score(log, vlim)
             results.append(s)
-            (out / f"{path.stem}.jsonl").write_text("\n".join(json.dumps(r) for r in log))
             print("   " + "  ".join(f"{k} {v:.1f}" if isinstance(v, float) else f"{k} {v}"
                                      for k, v in s.items() if k not in ("gains", "gains_file",
                                                                          "lead", "max_error_m",
