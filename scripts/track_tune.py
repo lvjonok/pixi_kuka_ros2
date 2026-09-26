@@ -464,14 +464,13 @@ def replay(args: argparse.Namespace) -> int:
             except Abort as why:
                 # Hold where the arm is, keep what was logged, and go on to the next file --
                 # unless the cell itself is gone (stale pose, a second publisher).
-                _hold(cell)
+                _brake(cell, restore, args.settle_s)
                 at = f"{log[-1]['t']:.2f} s into the run" if log else "during the approach"
                 aborted = f"{why} ({at})"
                 print(f"   ABORTED: {aborted}; holding the measured pose", file=sys.stderr)
                 if "stale" in str(why) or "another node" in str(why):
                     results.append({"gains_file": str(path), "aborted": aborted})
                     raise
-                time.sleep(args.settle_s)
             s = {"gains_file": str(path), "gains": now, "lead": lead,
                  "max_error_m": options.get("max_error_m"), "aborted": aborted}
             if len(log) > 50:
@@ -486,7 +485,7 @@ def replay(args: argparse.Namespace) -> int:
     except Abort as why:
         print(f"\nSTOPPED: {why}; the sweep cannot go on.", file=sys.stderr)
     except KeyboardInterrupt:
-        _hold(cell)
+        _brake(cell, restore, 1.0)
         print("\nSTOPPED by ^C; holding the measured pose.", file=sys.stderr)
     finally:
         cell.set_gains(restore)
@@ -495,6 +494,24 @@ def replay(args: argparse.Namespace) -> int:
             {"recording": str(rec), "seconds": float(t[-1]), "trials": results}, indent=2))
         print(f"wrote {out / 'summary.json'}")
     return 1 if any(r.get("aborted") for r in results) else 0
+
+
+def _brake(cell: Cell, restore: dict[str, float], seconds: float) -> None:
+    """Restore the safe gains FIRST, then follow the measured pose for ``seconds``.
+
+    26 Sep 2026, sweep 3: k 3000 / d 40 surged (A4 88 %), the run aborted, and the old hold --
+    one measured pose published, then 2 s idle under the candidate gains -- left an underdamped
+    arm swinging about a point it had already passed. FRI's CommandGuard dropped as the gains
+    were finally restored, and the operator hit the E-stop. A target that follows the measured
+    pose puts no spring on the arm at all; only damping acts, under the restored gains.
+    """
+    try:
+        cell.set_gains(restore)
+    finally:
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < seconds:
+            _hold(cell)
+            time.sleep(1.0 / RATE_HZ)
 
 
 def _hold(cell: Cell) -> None:
