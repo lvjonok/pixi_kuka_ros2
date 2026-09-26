@@ -522,6 +522,19 @@ def _hold(cell: Cell) -> None:
         cell.publish(pose[1], pose[2])
 
 
+def set_gains(args: argparse.Namespace) -> int:
+    """Put one gains file on the running controller, e.g. to teleoperate under a sweep's pick.
+
+    A relaunch of the driver returns to controllers.yaml + controllers_umi.yaml.
+    """
+    gains, _ = load_gains(Path(args.gains))
+    cell = Cell(publish=False)
+    cell.set_gains(gains)
+    names = ["task.k_pos_x", "task.d_pos_x", "task.k_rot_x", "task.d_rot_x", "nullspace.stiffness"]
+    print(f"{CARTESIAN} now: {cell.get_gains(names)}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -529,6 +542,8 @@ def main() -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     rec = sub.add_parser("record", help="capture target/current pose and joints until ^C")
     rec.add_argument("out")
+    st = sub.add_parser("set", help="set one gains file on the live controller (moves nothing)")
+    st.add_argument("gains")
     rep = sub.add_parser("replay", help="MOVES THE ARM: replay a recording under each gains file")
     rep.add_argument("recording")
     rep.add_argument("--gains", nargs="+", required=True)
@@ -546,6 +561,8 @@ def main() -> int:
     # be restored. ^C is a KeyboardInterrupt here, and the finally blocks run with ROS alive.
     rclpy.init(signal_handler_options=rclpy.signals.SignalHandlerOptions.NO)
     try:
+        if args.cmd == "set":
+            return set_gains(args)
         return record(args) if args.cmd == "record" else replay(args)
     finally:
         rclpy.try_shutdown()
