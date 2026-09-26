@@ -14,3 +14,8 @@ Sweep 5's baseline was 140 / 250 ms, so the KUKA damping explains part of the hi
 the gain came from the stiffer rotation. Nullspace 10 instead of 30 did nothing or worse. In
 rec1's last second the target asks A4 for ~80 % of its limit at any gains, so every run there
 hits the 80 % abort; scores cover the first ~10.5 s.
+
+**Adopted (26 Sep 2026):** `feel_k2500_d110_r250_d20_f09` -- 2500/110, 250/20, nullspace 30,
+`filter.target_pose` 0.9 -- is now what `controllers_umi.yaml` launches. s4_r300_d10 replayed
+faster but was erratic by hand and a rapid stroke tripped the driver's velocity guard. Use it as
+`--restore` from now on; `baseline.yaml` is the pre-tuning launch.

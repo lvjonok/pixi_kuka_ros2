@@ -54,22 +54,35 @@
   ros__parameters:
     end_effector_frame: lbr_umi_camera
 
-    # Rotation, stiffer than the excitation profile's 60, because here orientation is half of
-    # what is being commanded: a policy's chunk is a camera pose, and the operator's first drive
-    # with camera_gizmo.py (21 Sep 2026) found rotation lagging and falling short where
-    # translation did not. 100 is not a tuning result, it is crisp's ceiling:
-    # variable_max_stiffness.rotational is validated to [0, 100] in cartesian_controller.yaml,
-    # and k_rot above it is clamped with only a throttled warning. Past 100 needs that bound
-    # patched. At the gizmo's 10 deg error clamp this is 17.5 Nm about the camera.
+    # Tuned 26 Sep 2026 for Haply teleop by replaying one teleoperated trajectory under each set
+    # (scripts/track_tune.py; config/tune/README.md has every sweep). controllers.yaml's
+    # 1300/84, 60/15.5 (100/20 here before) trailed the target by 160 ms in position and 290 ms
+    # in rotation. Lag ~= (d + hidden) / k, the hidden part being the LBRServer joint-impedance
+    # damping under the FRI torque overlay (lowered 0.7 -> 0.3 on the robot controller the same
+    # day) and friction. Stiffer and less damped (2500/60, 300/10) replayed at 65 / 75 ms but on
+    # the arm was erratic and a rapid stroke tripped the driver's velocity guard, so damping is
+    # given back: this set felt right to the operator (config/tune/feel_k2500_d110_r250_d20_f09).
     #
-    # Only the rotational keys are restated; the translational ones stay controllers.yaml's.
+    # Rotation above 100 needs patches/crisp_controllers-rotational-stiffness-ceiling.patch:
+    # variable_max_stiffness.rotational was validated to [0, 100] and clamps k_rot.
     task:
-      k_rot_x: 100.0
-      k_rot_y: 100.0
-      k_rot_z: 100.0
-      # 2*sqrt(100): zeta 1 at unit inertia, the same rule controllers.yaml uses for its 15.5.
+      k_pos_x: 2500.0
+      k_pos_y: 2500.0
+      k_pos_z: 2500.0
+      d_pos_x: 110.0
+      d_pos_y: 110.0
+      d_pos_z: 110.0
+      k_rot_x: 250.0
+      k_rot_y: 250.0
+      k_rot_z: 250.0
       d_rot_x: 20.0
       d_rot_y: 20.0
       d_rot_z: 20.0
     variable_max_stiffness:
-      rotational: 100.0
+      translational: 2500.0
+      rotational: 250.0
+    # The Haply target arrives in 30 Hz steps of up to 8 mm; at this stiffness each was a kick.
+    # EMA weight on the PREVIOUS desired pose per 2 ms cycle (launch 0.1): 0.9 ramps a step over
+    # ~20 ms, which is ~20 ms of lag.
+    filter:
+      target_pose: 0.9
