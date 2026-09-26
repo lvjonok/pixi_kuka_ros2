@@ -63,21 +63,24 @@
     # the arm was erratic and a rapid stroke tripped the driver's velocity guard, so damping is
     # given back: this set felt right to the operator (config/tune/feel_k2500_d110_r250_d20_f09).
     #
+    # Damping then raised again at the operator's request (110 -> 140, 20 -> 25), for a calmer,
+    # safer arm with force feedback on; by the sweep fit that costs ~12 ms / ~20 ms of lag.
+    #
     # Rotation above 100 needs patches/crisp_controllers-rotational-stiffness-ceiling.patch:
     # variable_max_stiffness.rotational was validated to [0, 100] and clamps k_rot.
     task:
       k_pos_x: 2500.0
       k_pos_y: 2500.0
       k_pos_z: 2500.0
-      d_pos_x: 110.0
-      d_pos_y: 110.0
-      d_pos_z: 110.0
+      d_pos_x: 140.0
+      d_pos_y: 140.0
+      d_pos_z: 140.0
       k_rot_x: 250.0
       k_rot_y: 250.0
       k_rot_z: 250.0
-      d_rot_x: 20.0
-      d_rot_y: 20.0
-      d_rot_z: 20.0
+      d_rot_x: 25.0
+      d_rot_y: 25.0
+      d_rot_z: 25.0
     variable_max_stiffness:
       translational: 2500.0
       rotational: 250.0

@@ -19,3 +19,5 @@ hits the 80 % abort; scores cover the first ~10.5 s.
 `filter.target_pose` 0.9 -- is now what `controllers_umi.yaml` launches. s4_r300_d10 replayed
 faster but was erratic by hand and a rapid stroke tripped the driver's velocity guard. Use it as
 `--restore` from now on; `baseline.yaml` is the pre-tuning launch.
+Then damping raised for safety with force feedback on (d 110 -> 140, d_rot 20 -> 25):
+`launch.yaml` mirrors what controllers_umi.yaml launches; use it as `--restore`.
