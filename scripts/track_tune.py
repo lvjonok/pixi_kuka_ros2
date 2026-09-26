@@ -60,7 +60,7 @@ import rclpy
 import rclpy.signals
 import yaml
 from controller_manager_msgs.srv import ListControllers
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, WrenchStamped
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
@@ -124,6 +124,13 @@ class Cell(Node):
         self.pub = self.create_publisher(PoseStamped, TARGET_TOPIC, 1) if publish else None
         if not publish:
             self.create_subscription(PoseStamped, TARGET_TOPIC, self._on_target, 10)
+            # The estimated contact wrench (tweezer tips, in lbr_umi_camera's axes), so a
+            # recording can say what the estimator reads in free motion -- the phantom force the
+            # Haply renders as walls.
+            self.create_subscription(
+                WrenchStamped, f"{NS}/force_torque_broadcaster/wrench", self._on_wrench,
+                qos_profile_sensor_data,
+            )
         self.executor_ = SingleThreadedExecutor()
         self.executor_.add_node(self)
         self.spinner = threading.Thread(target=self._spin, daemon=True)
@@ -147,6 +154,12 @@ class Cell(Node):
     def _on_target(self, msg: PoseStamped) -> None:
         if self.sink:
             self.sink(_pose_row(time.monotonic(), "target", msg))
+
+    def _on_wrench(self, msg: WrenchStamped) -> None:
+        if self.sink:
+            f, m = msg.wrench.force, msg.wrench.torque
+            self.sink({"t": time.monotonic(), "k": "wrench", "frame": msg.header.frame_id,
+                       "f": [f.x, f.y, f.z], "m": [m.x, m.y, m.z]})
 
     def _on_joints(self, msg: JointState) -> None:
         pos, vel = dict(zip(msg.name, msg.position)), dict(zip(msg.name, msg.velocity))
@@ -236,7 +249,7 @@ def record(args: argparse.Namespace) -> int:
     out = Path(args.out).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
     cell = Cell(publish=False)
-    counts = {"target": 0, "pose": 0, "joints": 0}
+    counts = {"target": 0, "pose": 0, "joints": 0, "wrench": 0}
     lock = threading.Lock()
     with out.open("w") as f:
 
