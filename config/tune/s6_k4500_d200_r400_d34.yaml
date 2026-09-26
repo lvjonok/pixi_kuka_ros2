@@ -1,0 +1,13 @@
+# Sweep 6 (26 Sep 2026): small motions. The first gripper session found the arm unresponsive to
+# small hand movements. Stiffer again at the same ratio: residual x0.55, lag 67 ms.
+# Scored by track_tune.py's fine metrics (hold error, small-move delay) on a recording of small
+# moves, against launch.yaml.
+/lbr/cartesian_impedance_controller:
+  ros__parameters:
+    variable_max_stiffness: {translational: 4500.0, rotational: 1000.0}
+    task:
+      {k_pos_x: 4500.0, k_pos_y: 4500.0, k_pos_z: 4500.0, d_pos_x: 200.0, d_pos_y: 200.0, d_pos_z: 200.0,
+       k_rot_x: 400.0, k_rot_y: 400.0, k_rot_z: 400.0, d_rot_x: 34.0, d_rot_y: 34.0, d_rot_z: 34.0}
+    nullspace: {stiffness: 30.0, damping: 11.0}
+    filter: {target_pose: 0.9}
+  replay: {lead: false, max_error_m: null}

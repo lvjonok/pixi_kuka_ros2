@@ -426,7 +426,113 @@ def score(log: list[dict[str, Any]], vlim: np.ndarray) -> dict[str, float]:
         "target_peak_mps": peak_speed(ref_p),
         "peak_joint_speed_frac": float(np.nanmax(speed)),
         "peak_joint": JOINT_NAMES[int(np.nanargmax(speed))],
-    }
+    } | fine(t, ref_p, ref_r, mp, mr)
+
+
+# -- small motions -------------------------------------------------------------------------
+
+FINE_HZ = 100.0
+STILL_S = 0.3        # the target has not moved for this long: the arm should be on it
+STILL_MM = 0.2       # ... by more than this
+STILL_DEG = 0.05
+HOLD_S = 1.0         # ... and for this long: the transient is over
+SMALL_MM = (0.5, 10.0)
+
+
+def fine(t: np.ndarray, ref_p: np.ndarray, ref_r: Rotation, mp: np.ndarray,
+         mr: Rotation) -> dict[str, float]:
+    """How the arm answers SMALL motions: what the lag score averages away.
+
+    26 Sep 2026, first gripper session: "unresponsive in very small movements". Two numbers
+    say which kind:
+
+    * hold error -- where the arm sits once the target has been still for 1 s. Joint
+      friction the spring cannot overcome leaves a residual of about friction / stiffness
+      that no amount of waiting removes (p50 / p95, mm and deg).
+    * small moves -- target moves of 0.5-10 mm between two stills: how much later than the
+      target the arm covers half of it, and the error 0.5 s after the target stops.
+
+    ``ref_*`` is the target the controller held at each ``t`` (zero-order hold of what was
+    published), ``m*`` the measured pose at the same times.
+    """
+    g = np.arange(t[0], t[-1], 1.0 / FINE_HZ)
+    i = np.clip(np.searchsorted(t, g, side="right") - 1, 0, len(t) - 1)
+    rp, mpp, rr, mrr = ref_p[i], mp[i], ref_r[i], mr[i]
+    back = int(STILL_S * FINE_HZ)
+    # The target's largest excursion over the last STILL_S (a move has ended) and over the
+    # last HOLD_S (the arm has had time to arrive: what is left is what it will not close).
+    hold = int(HOLD_S * FINE_HZ)
+    moved = np.zeros(len(g))
+    turned = np.zeros(len(g))
+    still = np.zeros(len(g), dtype=bool)
+    for k in range(1, hold + 1):
+        moved[k:] = np.maximum(moved[k:], np.linalg.norm(rp[k:] - rp[:-k], axis=1) * 1e3)
+        turned[k:] = np.maximum(turned[k:], np.degrees((rr[k:] * rr[:-k].inv()).magnitude()))
+        if k == back:
+            still = (moved < STILL_MM) & (turned < STILL_DEG)
+            still[:back] = False
+    hold_mask = (moved < STILL_MM) & (turned < STILL_DEG)
+    hold_mask[:hold] = False
+    e_p = np.linalg.norm(rp - mpp, axis=1) * 1e3
+    e_r = np.degrees((rr * mrr.inv()).magnitude())
+
+    out: dict[str, float] = {"hold_n": int(hold_mask.sum())}
+    if hold_mask.any():
+        out |= {"hold_p50_mm": float(np.percentile(e_p[hold_mask], 50)),
+                "hold_p95_mm": float(np.percentile(e_p[hold_mask], 95)),
+                "hold_p50_deg": float(np.percentile(e_r[hold_mask], 50)),
+                "hold_p95_deg": float(np.percentile(e_r[hold_mask], 95))}
+
+    # Moves: from the last still sample before the target leaves to the first after it returns.
+    delays, residuals = [], []
+    edges = np.flatnonzero(np.diff(still.astype(int)))
+    starts = [k for k in edges if still[k] and not still[k + 1]]
+    for a in starts:
+        later = np.flatnonzero(still[a + 1:])
+        if not len(later):
+            break
+        # `still` turns true STILL_S after the target stopped; that stop is where it ends.
+        b = a + 1 + int(later[0]) - back
+        if b <= a:
+            continue
+        d = rp[b] - rp[a]
+        dist = float(np.linalg.norm(d)) * 1e3
+        if not SMALL_MM[0] <= dist <= SMALL_MM[1]:
+            continue
+        u = d / np.linalg.norm(d)
+        stop = min(len(g) - 1, b + int(1.0 * FINE_HZ))
+        ref_along = (rp[a:stop] - rp[a]) @ u * 1e3
+        arm_along = (mpp[a:stop] - mpp[a]) @ u * 1e3
+        half = dist / 2
+        t_ref = np.flatnonzero(ref_along >= half)
+        t_arm = np.flatnonzero(arm_along >= half)
+        if len(t_ref) and len(t_arm):
+            delays.append((t_arm[0] - t_ref[0]) / FINE_HZ * 1e3)
+        settle = min(len(g) - 1, b + int(0.5 * FINE_HZ))
+        residuals.append(float(e_p[settle]))
+    out["small_moves"] = len(residuals)
+    if delays:
+        out |= {"small_delay_p50_ms": float(np.median(delays)),
+                "small_delay_p90_ms": float(np.percentile(delays, 90))}
+    if residuals:
+        out["small_settle_p50_mm"] = float(np.median(residuals))
+    return out
+
+
+def fine_from_recording(args: argparse.Namespace) -> int:
+    """Score a `record` file (the operator's own teleop) for small motions. No ROS."""
+    path = Path(args.recording).expanduser()
+    tt, tp, tr = load_series(path, "target")
+    mt, mp, mr = load_series(path, "pose")
+    keep = (mt >= tt[0]) & (mt <= tt[-1])
+    mt, mp, mr = mt[keep], mp[keep], mr[keep]
+    # The target the controller held at each measured sample: the last one published.
+    i = np.clip(np.searchsorted(tt, mt, side="right") - 1, 0, len(tt) - 1)
+    out = fine(mt - mt[0], tp[i], tr[i], mp, mr)
+    print(f"{path.name}: {mt[-1] - mt[0]:.0f} s")
+    print("  " + "  ".join(f"{k} {v:.2f}" if isinstance(v, float) else f"{k} {v}"
+                           for k, v in out.items()))
+    return 0
 
 
 def replay(args: argparse.Namespace) -> int:
@@ -557,6 +663,8 @@ def main() -> int:
     rec.add_argument("out")
     st = sub.add_parser("set", help="set one gains file on the live controller (moves nothing)")
     st.add_argument("gains")
+    fn = sub.add_parser("fine", help="score a recording's small motions (no ROS, moves nothing)")
+    fn.add_argument("recording")
     rep = sub.add_parser("replay", help="MOVES THE ARM: replay a recording under each gains file")
     rep.add_argument("recording")
     rep.add_argument("--gains", nargs="+", required=True)
@@ -570,6 +678,8 @@ def main() -> int:
     rep.add_argument("--abort-speed", type=float, default=0.8,
                      help="fraction of a joint's velocity limit that aborts a run")
     args = parser.parse_args()
+    if args.cmd == "fine":
+        return fine_from_recording(args)
     # No rclpy signal handlers: they shut the context down on ^C, and the gains could then not
     # be restored. ^C is a KeyboardInterrupt here, and the finally blocks run with ROS alive.
     rclpy.init(signal_handler_options=rclpy.signals.SignalHandlerOptions.NO)
