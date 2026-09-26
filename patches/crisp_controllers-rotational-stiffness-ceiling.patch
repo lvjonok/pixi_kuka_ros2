@@ -1,0 +1,32 @@
+From 2318f189380e8915bc77c1e020392f773b2731ce Mon Sep 17 00:00:00 2001
+From: Lev Kozlov <kozlov.l.a10@gmail.com>
+Date: Sat, 26 Sep 2026 14:17:22 +0900
+Subject: [PATCH] feat: variable_max_stiffness.rotational may go to 1000 Nm/rad
+ (was 100)
+
+The ceiling clamps task.k_rot_*, whose own bound is 5000. At 100 on the KUKA iiwa14 with the
+UMI, rotation trails its target by ~200 ms (pixi_kuka_ros2 track_tune sweeps 2-3, 26 Sep 2026:
+lag ~= (d_rot + ~11 hidden) / k_rot), and no damping choice gets under that.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01PYsbnsZbpqrrGZhLJYaMks
+---
+ src/cartesian_controller.yaml | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/cartesian_controller.yaml b/src/cartesian_controller.yaml
+index 01a17c8..1b4c5c6 100644
+--- a/src/cartesian_controller.yaml
++++ b/src/cartesian_controller.yaml
+@@ -339,7 +339,7 @@ cartesian_controller:
+       default_value: 60.0
+       description: "Maximum allowed rotational stiffness value. Stiffness values above this will be clamped."
+       validation:
+-        bounds<>: [0.0, 100.0]
++        bounds<>: [0.0, 1000.0]
+ 
+   variable_stiffness:
+     enabled:
+-- 
+2.43.0
+

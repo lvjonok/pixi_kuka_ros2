@@ -64,3 +64,22 @@ git -C src/crisp_controllers am < patches/crisp_controllers-activate-clears-targ
 pixi run -e jazzy colcon build --base-paths . src --packages-select crisp_controllers \
   --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
 ```
+
+## crisp_controllers-rotational-stiffness-ceiling.patch
+
+Applies on top of the activation patch.
+
+`variable_max_stiffness.rotational` clamps `task.k_rot_*` (whose own bound is 5000) and was
+validated to [0, 100]. On the iiwa14 with the UMI, rotation then trails its target by ~200 ms
+whatever the damping: `scripts/track_tune.py` sweeps 2-3 (26 Sep 2026) fit
+lag ~= (d_rot + ~11 hidden) / k_rot, the hidden part being below crisp. The ceiling is now 1000.
+Nothing changes until a config or a `set_parameters` raises it; controllers_umi.yaml still
+launches at 100.
+
+Re-apply after a fresh import, after the activation patch:
+
+```bash
+git -C src/crisp_controllers am < patches/crisp_controllers-rotational-stiffness-ceiling.patch
+pixi run -e jazzy colcon build --base-paths . src --packages-select crisp_controllers \
+  --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+```

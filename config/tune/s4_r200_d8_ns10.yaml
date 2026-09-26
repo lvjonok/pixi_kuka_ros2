@@ -1,0 +1,13 @@
+# s4_r200_d8 with the nullspace spring at a third (damping 2 sqrt(k)).
+# Sweep 4 (26 Sep 2026): translation fixed at sweep 3's 2500 / 60 (90 ms, A4 at 0.7); rotation
+# past crisp's old ceiling of 100 (patches/crisp_controllers-rotational-stiffness-ceiling.patch),
+# and the nullspace spring, which resists the reconfiguration a wrist rotation needs.
+# Model from sweeps 2-3: rot lag ~= (d_rot + ~11) / k_rot.
+/lbr/cartesian_impedance_controller:
+  ros__parameters:
+    variable_max_stiffness: {translational: 2500.0, rotational: 1000.0}
+    task:
+      {k_pos_x: 2500.0, k_pos_y: 2500.0, k_pos_z: 2500.0, d_pos_x: 60.0, d_pos_y: 60.0, d_pos_z: 60.0,
+       k_rot_x: 200.0, k_rot_y: 200.0, k_rot_z: 200.0, d_rot_x: 8.0, d_rot_y: 8.0, d_rot_z: 8.0}
+    nullspace: {stiffness: 10.0, damping: 6.3}
+  replay: {lead: false, max_error_m: null}
