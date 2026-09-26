@@ -1,0 +1,8 @@
+# Further: translation 2500, rotation 50 (26 Sep try2).
+/lbr/cartesian_impedance_controller:
+  ros__parameters:
+    variable_max_stiffness: {translational: 2500.0, rotational: 100.0}
+    task:
+      {k_pos_x: 2500.0, k_pos_y: 2500.0, k_pos_z: 2500.0, d_pos_x: 90.0, d_pos_y: 90.0, d_pos_z: 90.0,
+       k_rot_x: 50.0, k_rot_y: 50.0, k_rot_z: 50.0, d_rot_x: 18.0, d_rot_y: 18.0, d_rot_z: 18.0}
+  replay: {lead: false}

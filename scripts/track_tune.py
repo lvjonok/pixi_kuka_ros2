@@ -1,0 +1,460 @@
+"""Record a teleoperated camera trajectory, replay it under candidate gains, score the tracking.
+
+Tuning the Cartesian impedance by feel mixes the gains with the operator: every try is a
+different motion. This fixes the motion. `record` captures what the arm was actually sent
+(/lbr/target_pose, after every clamp upstream of it) and what it did (/lbr/current_pose,
+/lbr/joint_states) while someone teleoperates. `replay` sends that same target sequence again,
+once per gains file, and scores each run against the same numbers:
+
+* lag -- the time shift that best aligns the arm with the target, and the error left after it
+  (the shape error: overshoot, ringing, anything a pure delay does not explain);
+* position and rotation error, RMS and max, against the target the controller held;
+* the peak joint speed as a fraction of the joint's limit -- lbr_fri_ros2's CommandGuard drops
+  FRI above 1.0 (26 Sep 2026: A1 during Haply teleop with k_rot 100).
+
+Why a lag exists at all: crisp damps against MEASURED velocity with the target's velocity
+taken as zero, so a target moving at v holds a steady-state error of (D/K) v behind it -- 65 ms
+at k_pos 1300 / d_pos 84. A gains file may set `replay: {lead: true}` to send each target
+(D/K) v ahead of itself (camera_gizmo.py's lead), which cancels that at constant speed.
+
+    # 1. record, while the operator teleoperates (lerobot_pickplace `make teleop-arm`):
+    pixi run -e jazzy python scripts/track_tune.py record ~/data/track/rec1.jsonl
+    # 2. arm the cell (lerobot_pickplace scripts/kuka_cell.py arm), then:
+    pixi run -e jazzy python scripts/track_tune.py replay ~/data/track/rec1.jsonl \
+        --gains g/baseline.yaml g/try1.yaml --restore g/baseline.yaml --out ~/data/track/sweep1
+
+Gains files are `ros2 param load` files for /lbr/cartesian_impedance_controller (nested keys
+are flattened with dots). Every parameter is dynamic in crisp_controllers; they are set over
+the node's set_parameters service before each run, and --restore is set on every way out.
+
+replay MOVES THE ARM, in T1 with the enabling switch held. Before each run it walks the target
+from where the arm stands to the recording's first pose (5 cm/s, 15 deg/s) and settles. It
+refuses unless cartesian_impedance_controller is active and nothing else publishes targets, and
+it aborts -- holds the measured pose and stops the sweep -- on a tracking error above
+--abort-m / --abort-deg, a joint above --abort-speed of its limit, a target under --floor-z, a
+stale pose, or a second publisher. It publishes directly, not through crisp_py, whose Robot
+starts its own target publisher on construction.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pinocchio as pin
+import rclpy
+import yaml
+from controller_manager_msgs.srv import ListControllers
+from geometry_msgs.msg import PoseStamped
+from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
+from rcl_interfaces.srv import GetParameters, SetParameters
+from rclpy.executors import SingleThreadedExecutor
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
+from scipy.spatial.transform import Rotation, Slerp
+from sensor_msgs.msg import JointState
+from std_msgs.msg import String
+
+NS = "/lbr"
+TARGET_TOPIC = f"{NS}/target_pose"
+CARTESIAN = "cartesian_impedance_controller"
+BASE_FRAME = "lbr_link_0"
+JOINT_NAMES = tuple(f"lbr_A{i + 1}" for i in range(7))
+RATE_HZ = 100.0
+
+
+# -- recording file ------------------------------------------------------------------------
+
+
+def _pose_row(t: float, kind: str, msg: PoseStamped) -> dict[str, Any]:
+    p, o = msg.pose.position, msg.pose.orientation
+    return {"t": t, "k": kind, "p": [p.x, p.y, p.z], "q": [o.x, o.y, o.z, o.w]}
+
+
+def load_series(path: Path, kind: str) -> tuple[np.ndarray, np.ndarray, Rotation]:
+    """``(t, positions, rotations)`` of one pose stream in a recording, t from its first row."""
+    rows = [r for r in map(json.loads, path.read_text().splitlines()) if r["k"] == kind]
+    if len(rows) < 2:
+        raise SystemExit(f"{path}: fewer than two {kind!r} rows")
+    t = np.array([r["t"] for r in rows])
+    return t, np.array([r["p"] for r in rows]), Rotation.from_quat([r["q"] for r in rows])
+
+
+# -- node ----------------------------------------------------------------------------------
+
+
+class Cell(Node):
+    """Topics and services of the running cell; state updated by a background executor."""
+
+    def __init__(self, *, publish: bool) -> None:
+        super().__init__("track_tune")
+        self.lock = threading.Lock()
+        self.pose: tuple[float, np.ndarray, Rotation] | None = None
+        self.q: np.ndarray | None = None
+        self.dq: np.ndarray | None = None
+        self.sink: Any = None  # callable(row) while recording
+        self.create_subscription(
+            PoseStamped, f"{NS}/current_pose", self._on_pose, qos_profile_sensor_data
+        )
+        self.create_subscription(
+            JointState, f"{NS}/joint_states", self._on_joints, qos_profile_sensor_data
+        )
+        self.pub = self.create_publisher(PoseStamped, TARGET_TOPIC, 1) if publish else None
+        if not publish:
+            self.create_subscription(PoseStamped, TARGET_TOPIC, self._on_target, 10)
+        self.executor_ = SingleThreadedExecutor()
+        self.executor_.add_node(self)
+        threading.Thread(target=self.executor_.spin, daemon=True).start()
+
+    def _on_pose(self, msg: PoseStamped) -> None:
+        p, o = msg.pose.position, msg.pose.orientation
+        now = time.monotonic()
+        with self.lock:
+            self.pose = (now, np.array([p.x, p.y, p.z]), Rotation.from_quat([o.x, o.y, o.z, o.w]))
+        if self.sink:
+            self.sink(_pose_row(now, "pose", msg))
+
+    def _on_target(self, msg: PoseStamped) -> None:
+        if self.sink:
+            self.sink(_pose_row(time.monotonic(), "target", msg))
+
+    def _on_joints(self, msg: JointState) -> None:
+        pos, vel = dict(zip(msg.name, msg.position)), dict(zip(msg.name, msg.velocity))
+        if not all(n in pos for n in JOINT_NAMES):
+            return
+        with self.lock:
+            self.q = np.array([pos[n] for n in JOINT_NAMES])
+            self.dq = np.array([vel.get(n, np.nan) for n in JOINT_NAMES])
+        if self.sink:
+            self.sink({"t": time.monotonic(), "k": "joints", "q": self.q.tolist(),
+                       "dq": self.dq.tolist()})
+
+    def call(self, client: Any, request: Any, timeout_s: float = 5.0) -> Any:
+        """A service call answered by the background executor."""
+        if not client.wait_for_service(timeout_sec=timeout_s):
+            raise SystemExit(f"service {client.srv_name} is not up")
+        future = client.call_async(request)
+        deadline = time.monotonic() + timeout_s
+        while not future.done():
+            if time.monotonic() > deadline:
+                raise SystemExit(f"service {client.srv_name} did not answer in {timeout_s} s")
+            time.sleep(0.01)
+        return future.result()
+
+    def active_controllers(self) -> set[str]:
+        client = self.create_client(ListControllers, f"{NS}/controller_manager/list_controllers")
+        result = self.call(client, ListControllers.Request())
+        return {c.name for c in result.controller if c.state == "active"}
+
+    def get_gains(self, names: list[str]) -> dict[str, float]:
+        client = self.create_client(GetParameters, f"{NS}/{CARTESIAN}/get_parameters")
+        result = self.call(client, GetParameters.Request(names=names))
+        return {n: v.double_value for n, v in zip(names, result.values)}
+
+    def set_gains(self, gains: dict[str, float]) -> None:
+        client = self.create_client(SetParameters, f"{NS}/{CARTESIAN}/set_parameters")
+        params = [
+            Parameter(
+                name=name,
+                value=ParameterValue(type=ParameterType.PARAMETER_DOUBLE, double_value=float(v)),
+            )
+            for name, v in gains.items()
+        ]
+        result = self.call(client, SetParameters.Request(parameters=params))
+        refused = [(p.name, r.reason) for p, r in zip(params, result.results) if not r.successful]
+        if refused:
+            raise SystemExit(f"{CARTESIAN} refused {refused}")
+
+    def publish(self, p: np.ndarray, r: Rotation) -> None:
+        msg = PoseStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = BASE_FRAME
+        msg.pose.position.x, msg.pose.position.y, msg.pose.position.z = (float(v) for v in p)
+        x, y, z, w = r.as_quat()
+        msg.pose.orientation.x, msg.pose.orientation.y = float(x), float(y)
+        msg.pose.orientation.z, msg.pose.orientation.w = float(z), float(w)
+        self.pub.publish(msg)
+
+    def velocity_limits(self) -> np.ndarray:
+        """Per-joint velocity limits, rad/s, from the robot_description the stack runs."""
+        got: list[str] = []
+        qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        sub = self.create_subscription(
+            String, f"{NS}/robot_description", lambda m: got.append(m.data), qos
+        )
+        deadline = time.monotonic() + 10.0
+        while not got and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.destroy_subscription(sub)
+        if not got:
+            raise SystemExit(f"no {NS}/robot_description within 10 s -- is the stack up?")
+        model = pin.buildModelFromXML(got[0])
+        return np.array(
+            [model.velocityLimit[model.joints[model.getJointId(n)].idx_v] for n in JOINT_NAMES]
+        )
+
+
+# -- record --------------------------------------------------------------------------------
+
+
+def record(args: argparse.Namespace) -> int:
+    out = Path(args.out).expanduser()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cell = Cell(publish=False)
+    counts = {"target": 0, "pose": 0, "joints": 0}
+    lock = threading.Lock()
+    with out.open("w") as f:
+
+        def sink(row: dict[str, Any]) -> None:
+            with lock:
+                f.write(json.dumps(row) + "\n")
+                counts[row["k"]] += 1
+
+        cell.sink = sink
+        print(f"recording {TARGET_TOPIC}, current_pose, joint_states -> {out}; ^C to stop",
+              flush=True)
+        try:
+            while True:
+                time.sleep(2.0)
+                with lock:
+                    print(f"  {counts}", flush=True)
+        except KeyboardInterrupt:
+            pass
+        cell.sink = None
+    print(f"wrote {out}: {counts}")
+    if counts["target"] < 2:
+        print("NO TARGETS: nothing published on /lbr/target_pose while recording", file=sys.stderr)
+        return 1
+    return 0
+
+
+# -- replay --------------------------------------------------------------------------------
+
+
+def _flatten(tree: dict[str, Any], prefix: str = "") -> dict[str, float]:
+    out: dict[str, float] = {}
+    for k, v in tree.items():
+        name = f"{prefix}{k}"
+        if isinstance(v, dict):
+            out |= _flatten(v, name + ".")
+        else:
+            out[name] = float(v)
+    return out
+
+
+def load_gains(path: Path) -> tuple[dict[str, float], dict[str, Any]]:
+    """``(parameters, replay options)`` from a ros2-param-load file for the controller."""
+    doc = yaml.safe_load(Path(path).expanduser().read_text())
+    (node,) = doc.values()
+    options = node.get("replay", {}) or {}
+    return _flatten(node["ros__parameters"]), options
+
+
+class Abort(Exception):
+    """A safety condition; the arm is left holding its measured pose."""
+
+
+def _guard(cell: Cell, args: argparse.Namespace, vlim: np.ndarray, p: np.ndarray,
+           r: Rotation) -> tuple[np.ndarray, Rotation, np.ndarray]:
+    with cell.lock:
+        pose, dq = cell.pose, cell.dq
+    if pose is None or time.monotonic() - pose[0] > 0.2:
+        raise Abort("current_pose is stale (> 0.2 s)")
+    if cell.count_publishers(TARGET_TOPIC) > 1:
+        raise Abort("another node publishes on /lbr/target_pose")
+    if p[2] < args.floor_z:
+        raise Abort(f"target z {p[2]:.3f} under the floor {args.floor_z}")
+    _, mp, mr = pose
+    if np.linalg.norm(p - mp) > args.abort_m:
+        raise Abort(f"tracking error {np.linalg.norm(p - mp) * 1e3:.0f} mm > {args.abort_m} m")
+    if np.degrees((r * mr.inv()).magnitude()) > args.abort_deg:
+        raise Abort(f"rotation error > {args.abort_deg} deg")
+    if dq is not None and np.nanmax(np.abs(dq) / vlim) > args.abort_speed:
+        j = int(np.nanargmax(np.abs(dq) / vlim))
+        raise Abort(f"{JOINT_NAMES[j]} at {abs(dq[j]) / vlim[j]:.0%} of its velocity limit")
+    return mp, mr, dq
+
+
+def _approach(cell: Cell, args: argparse.Namespace, vlim: np.ndarray, p0: np.ndarray,
+              r0: Rotation) -> None:
+    """Walk the target from the measured pose to (p0, r0), then settle."""
+    with cell.lock:
+        _, sp, sr = cell.pose
+    dist = float(np.linalg.norm(p0 - sp))
+    ang = float((r0 * sr.inv()).magnitude())
+    duration = max(dist / 0.05, np.degrees(ang) / 15.0, 0.5)
+    slerp = Slerp([0.0, 1.0], Rotation.concatenate([sr, r0]))
+    t0 = time.monotonic()
+    while (s := (time.monotonic() - t0) / duration) < 1.0:
+        s = 0.5 - 0.5 * np.cos(np.pi * s)
+        p, r = sp + s * (p0 - sp), slerp([s])[0]
+        _guard(cell, args, vlim, p, r)
+        cell.publish(p, r)
+        time.sleep(1.0 / RATE_HZ)
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < args.settle_s:
+        _guard(cell, args, vlim, p0, r0)
+        cell.publish(p0, r0)
+        time.sleep(1.0 / RATE_HZ)
+
+
+def _run(cell: Cell, args: argparse.Namespace, vlim: np.ndarray, t: np.ndarray, P: np.ndarray,
+         R: Rotation, lead: tuple[float, float] | None) -> list[dict[str, Any]]:
+    """Send the recorded targets on their own clock; log (sent, measured, dq) each tick."""
+    log: list[dict[str, Any]] = []
+    t0 = time.monotonic()
+    i = 0
+    while (el := time.monotonic() - t0) <= t[-1]:
+        while i + 1 < len(t) and t[i + 1] <= el:
+            i += 1
+        p, r = P[i], R[i]
+        if lead is not None and i > 0:
+            dt = max(t[i] - t[i - 1], 1e-3)
+            v = (P[i] - P[i - 1]) / dt
+            w = (R[i] * R[i - 1].inv()).as_rotvec() / dt
+            p = p + lead[0] * v
+            r = Rotation.from_rotvec(lead[1] * w) * r
+        mp, mr, dq = _guard(cell, args, vlim, p, r)
+        cell.publish(p, r)
+        log.append({"t": el, "ref_p": P[i].tolist(), "ref_q": R[i].as_quat().tolist(),
+                    "p": mp.tolist(), "q": mr.as_quat().tolist(),
+                    "dq": None if dq is None else dq.tolist()})
+        time.sleep(1.0 / RATE_HZ)
+    return log
+
+
+def score(log: list[dict[str, Any]], vlim: np.ndarray) -> dict[str, float]:
+    """Lag, error after the lag, raw error, and the joint-speed margin of one run."""
+    t = np.array([row["t"] for row in log])
+    ref_p = np.array([row["ref_p"] for row in log])
+    ref_r = Rotation.from_quat([row["ref_q"] for row in log])
+    mp = np.array([row["p"] for row in log])
+    mr = Rotation.from_quat([row["q"] for row in log])
+
+    e_p = np.linalg.norm(ref_p - mp, axis=1) * 1e3
+    e_r = np.degrees((ref_r * mr.inv()).magnitude())
+
+    # The shift that best explains the arm as a delayed copy of the target.
+    grid = np.arange(0.0, 0.401, 0.005)
+    tt = t[(t > grid[-1])]
+
+    def shifted_rms(tau: float) -> tuple[float, float]:
+        rp = np.stack([np.interp(tt - tau, t, ref_p[:, k]) for k in range(3)], axis=1)
+        mpp = np.stack([np.interp(tt, t, mp[:, k]) for k in range(3)], axis=1)
+        idx = np.clip(np.searchsorted(t, tt - tau), 0, len(t) - 1)
+        jdx = np.clip(np.searchsorted(t, tt), 0, len(t) - 1)
+        er = np.degrees((ref_r[idx] * mr[jdx].inv()).magnitude())
+        return float(np.sqrt(np.mean(np.sum((rp - mpp) ** 2, axis=1))) * 1e3), float(
+            np.sqrt(np.mean(er**2))
+        )
+
+    rows = [shifted_rms(tau) for tau in grid]
+    kp, kr = int(np.argmin([a for a, _ in rows])), int(np.argmin([b for _, b in rows]))
+    dq = np.array([row["dq"] for row in log if row["dq"] is not None])
+    speed = np.nanmax(np.abs(dq) / vlim, axis=0) if len(dq) else np.full(7, np.nan)
+    return {
+        "pos_rms_mm": float(np.sqrt(np.mean(e_p**2))),
+        "pos_max_mm": float(e_p.max()),
+        "pos_lag_ms": float(grid[kp] * 1e3),
+        "pos_rms_after_lag_mm": rows[kp][0],
+        "rot_rms_deg": float(np.sqrt(np.mean(e_r**2))),
+        "rot_max_deg": float(e_r.max()),
+        "rot_lag_ms": float(grid[kr] * 1e3),
+        "rot_rms_after_lag_deg": rows[kr][1],
+        "peak_joint_speed_frac": float(np.nanmax(speed)),
+        "peak_joint": JOINT_NAMES[int(np.nanargmax(speed))],
+    }
+
+
+def replay(args: argparse.Namespace) -> int:
+    rec = Path(args.recording).expanduser()
+    t, P, R = load_series(rec, "target")
+    t = t - t[0]
+    if args.seconds:
+        keep = t <= args.seconds
+        t, P, R = t[keep], P[keep], R[keep]
+    trials = [(Path(g), *load_gains(g)) for g in args.gains]
+    restore, _ = load_gains(args.restore)
+    out = Path(args.out).expanduser()
+    out.mkdir(parents=True, exist_ok=True)
+
+    cell = Cell(publish=True)
+    time.sleep(0.5)
+    active = cell.active_controllers()
+    if CARTESIAN not in active:
+        raise SystemExit(f"{CARTESIAN} is not active: arm the cell first (kuka_cell.py arm)")
+    if cell.count_publishers(TARGET_TOPIC) > 1:
+        raise SystemExit("another node publishes on /lbr/target_pose; close it first")
+    vlim = cell.velocity_limits()
+    print(f"recording {rec.name}: {len(t)} targets over {t[-1]:.1f} s; "
+          f"{len(trials)} gains files; restore {args.restore}", flush=True)
+
+    results = []
+    try:
+        for path, gains, options in trials:
+            cell.set_gains(gains)
+            now = cell.get_gains(["task.k_pos_x", "task.d_pos_x", "task.k_rot_x", "task.d_rot_x"])
+            lead = None
+            if options.get("lead"):
+                lead = (now["task.d_pos_x"] / now["task.k_pos_x"],
+                        now["task.d_rot_x"] / now["task.k_rot_x"])
+            print(f"\n== {path.name}: {now} lead={lead}", flush=True)
+            time.sleep(0.3)
+            _approach(cell, args, vlim, P[0], R[0])
+            log = _run(cell, args, vlim, t, P, R, lead)
+            s = score(log, vlim) | {"gains_file": str(path), "gains": now, "lead": lead}
+            results.append(s)
+            (out / f"{path.stem}.jsonl").write_text("\n".join(json.dumps(r) for r in log))
+            print("   " + "  ".join(f"{k} {v:.1f}" if isinstance(v, float) else f"{k} {v}"
+                                     for k, v in s.items() if k not in ("gains", "gains_file",
+                                                                         "lead")), flush=True)
+    except Abort as why:
+        with cell.lock:
+            _, mp, mr = cell.pose
+        cell.publish(mp, mr)
+        print(f"\nABORTED: {why}. Holding the measured pose; sweep stopped.", file=sys.stderr)
+        results.append({"aborted": str(why)})
+    finally:
+        cell.set_gains(restore)
+        print(f"gains restored from {args.restore}", flush=True)
+        (out / "summary.json").write_text(json.dumps(
+            {"recording": str(rec), "seconds": float(t[-1]), "trials": results}, indent=2))
+        print(f"wrote {out / 'summary.json'}")
+    return 1 if results and "aborted" in results[-1] else 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    rec = sub.add_parser("record", help="capture target/current pose and joints until ^C")
+    rec.add_argument("out")
+    rep = sub.add_parser("replay", help="MOVES THE ARM: replay a recording under each gains file")
+    rep.add_argument("recording")
+    rep.add_argument("--gains", nargs="+", required=True)
+    rep.add_argument("--restore", required=True, help="gains set on every way out")
+    rep.add_argument("--out", required=True)
+    rep.add_argument("--seconds", type=float, default=None, help="replay only the first N s")
+    rep.add_argument("--settle-s", type=float, default=2.0)
+    rep.add_argument("--floor-z", type=float, default=0.20)
+    rep.add_argument("--abort-m", type=float, default=0.10)
+    rep.add_argument("--abort-deg", type=float, default=30.0)
+    rep.add_argument("--abort-speed", type=float, default=0.7,
+                     help="fraction of a joint's velocity limit that stops the sweep")
+    args = parser.parse_args()
+    rclpy.init()
+    try:
+        return record(args) if args.cmd == "record" else replay(args)
+    finally:
+        rclpy.try_shutdown()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
