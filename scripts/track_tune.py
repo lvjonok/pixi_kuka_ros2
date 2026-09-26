@@ -38,7 +38,7 @@ the node's set_parameters service before each run, and --restore is set on every
 replay MOVES THE ARM, in T1 with the enabling switch held. Before each run it walks the target
 from where the arm stands to the recording's first pose (5 cm/s, 15 deg/s) and settles. It
 refuses unless cartesian_impedance_controller is active and nothing else publishes targets, and
-it aborts -- holds the measured pose and stops the sweep -- on a tracking error above
+it aborts the run -- holds the measured pose, keeps the partial log, goes on to the next file -- on a tracking error above
 --abort-m / --abort-deg, a joint above --abort-speed of its limit, a target under --floor-z, a
 stale pose, or a second publisher. It publishes directly, not through crisp_py, whose Robot
 starts its own target publisher on construction.
@@ -57,12 +57,13 @@ from typing import Any
 import numpy as np
 import pinocchio as pin
 import rclpy
+import rclpy.signals
 import yaml
 from controller_manager_msgs.srv import ListControllers
 from geometry_msgs.msg import PoseStamped
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import GetParameters, SetParameters
-from rclpy.executors import SingleThreadedExecutor
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from scipy.spatial.transform import Rotation, Slerp
@@ -75,8 +76,9 @@ CARTESIAN = "cartesian_impedance_controller"
 BASE_FRAME = "lbr_link_0"
 JOINT_NAMES = tuple(f"lbr_A{i + 1}" for i in range(7))
 RATE_HZ = 100.0
-# Stopped before rclpy shuts down: an executor still spinning when the context goes segfaults.
-_EXECUTORS: list[SingleThreadedExecutor] = []
+# Joined after rclpy shuts down: a spin thread still running when the process exits segfaults
+# (or aborts, "terminate called without an active exception").
+_CELLS: list[Cell] = []
 
 
 # -- recording file ------------------------------------------------------------------------
@@ -124,8 +126,15 @@ class Cell(Node):
             self.create_subscription(PoseStamped, TARGET_TOPIC, self._on_target, 10)
         self.executor_ = SingleThreadedExecutor()
         self.executor_.add_node(self)
-        _EXECUTORS.append(self.executor_)
-        threading.Thread(target=self.executor_.spin, daemon=True).start()
+        self.spinner = threading.Thread(target=self._spin, daemon=True)
+        _CELLS.append(self)
+        self.spinner.start()
+
+    def _spin(self) -> None:
+        try:
+            self.executor_.spin()
+        except (ExternalShutdownException, rclpy.executors.ShutdownException):
+            pass
 
     def _on_pose(self, msg: PoseStamped) -> None:
         p, o = msg.pose.position, msg.pose.orientation
@@ -326,9 +335,8 @@ def _approach(cell: Cell, args: argparse.Namespace, vlim: np.ndarray, p0: np.nda
 
 def _run(cell: Cell, args: argparse.Namespace, vlim: np.ndarray, t: np.ndarray, P: np.ndarray,
          R: Rotation, lead: tuple[float, float] | None,
-         max_error_m: float | None) -> list[dict[str, Any]]:
-    """Send the recorded targets on their own clock; log (sent, measured, dq) each tick."""
-    log: list[dict[str, Any]] = []
+         max_error_m: float | None, log: list[dict[str, Any]]) -> None:
+    """Send the recorded targets on their own clock; append (sent, measured, dq) each tick."""
     t0 = time.monotonic()
     i = 0
     while (el := time.monotonic() - t0) <= t[-1]:
@@ -354,7 +362,6 @@ def _run(cell: Cell, args: argparse.Namespace, vlim: np.ndarray, t: np.ndarray, 
                     "p": mp.tolist(), "q": mr.as_quat().tolist(),
                     "dq": None if dq is None else dq.tolist()})
         time.sleep(1.0 / RATE_HZ)
-    return log
 
 
 def score(log: list[dict[str, Any]], vlim: np.ndarray) -> dict[str, float]:
@@ -431,10 +438,17 @@ def replay(args: argparse.Namespace) -> int:
     vlim = cell.velocity_limits()
     print(f"recording {rec.name}: {len(t)} targets over {t[-1]:.1f} s; "
           f"{len(trials)} gains files; restore {args.restore}", flush=True)
+    # The operator starts it, at the arm: a replay launched from a script or another terminal
+    # against a cell someone left armed would move the arm with nobody holding the switch.
+    if not sys.stdin.isatty():
+        raise SystemExit("replay moves the arm and needs an operator at a terminal to start it")
+    if input("THE ARM WILL MOVE. Enabling switch held, E-stop in reach? type 'go': ") != "go":
+        raise SystemExit("not started")
 
-    results = []
+    results: list[dict[str, Any]] = []
     try:
         for path, gains, options in trials:
+            log: list[dict[str, Any]] = []
             cell.set_gains(gains)
             now = cell.get_gains(["task.k_pos_x", "task.d_pos_x", "task.k_rot_x", "task.d_rot_x"])
             lead = None
@@ -443,29 +457,52 @@ def replay(args: argparse.Namespace) -> int:
                         now["task.d_rot_x"] / now["task.k_rot_x"])
             print(f"\n== {path.name}: {now} lead={lead}", flush=True)
             time.sleep(0.3)
-            _approach(cell, args, vlim, P[0], R[0])
-            log = _run(cell, args, vlim, t, P, R, lead, options.get("max_error_m"))
-            s = score(log, vlim) | {"gains_file": str(path), "gains": now, "lead": lead,
-                                    "max_error_m": options.get("max_error_m")}
+            aborted = None
+            try:
+                _approach(cell, args, vlim, P[0], R[0])
+                _run(cell, args, vlim, t, P, R, lead, options.get("max_error_m"), log)
+            except Abort as why:
+                # Hold where the arm is, keep what was logged, and go on to the next file --
+                # unless the cell itself is gone (stale pose, a second publisher).
+                _hold(cell)
+                at = f"{log[-1]['t']:.2f} s into the run" if log else "during the approach"
+                aborted = f"{why} ({at})"
+                print(f"   ABORTED: {aborted}; holding the measured pose", file=sys.stderr)
+                if "stale" in str(why) or "another node" in str(why):
+                    results.append({"gains_file": str(path), "aborted": aborted})
+                    raise
+                time.sleep(args.settle_s)
+            s = {"gains_file": str(path), "gains": now, "lead": lead,
+                 "max_error_m": options.get("max_error_m"), "aborted": aborted}
+            if len(log) > 50:
+                s |= score(log, vlim)
             results.append(s)
             (out / f"{path.stem}.jsonl").write_text("\n".join(json.dumps(r) for r in log))
             print("   " + "  ".join(f"{k} {v:.1f}" if isinstance(v, float) else f"{k} {v}"
                                      for k, v in s.items() if k not in ("gains", "gains_file",
-                                                                         "lead", "max_error_m")),
+                                                                         "lead", "max_error_m",
+                                                                         "aborted")),
                   flush=True)
     except Abort as why:
-        with cell.lock:
-            _, mp, mr = cell.pose
-        cell.publish(mp, mr)
-        print(f"\nABORTED: {why}. Holding the measured pose; sweep stopped.", file=sys.stderr)
-        results.append({"aborted": str(why)})
+        print(f"\nSTOPPED: {why}; the sweep cannot go on.", file=sys.stderr)
+    except KeyboardInterrupt:
+        _hold(cell)
+        print("\nSTOPPED by ^C; holding the measured pose.", file=sys.stderr)
     finally:
         cell.set_gains(restore)
         print(f"gains restored from {args.restore}", flush=True)
         (out / "summary.json").write_text(json.dumps(
             {"recording": str(rec), "seconds": float(t[-1]), "trials": results}, indent=2))
         print(f"wrote {out / 'summary.json'}")
-    return 1 if results and "aborted" in results[-1] else 0
+    return 1 if any(r.get("aborted") for r in results) else 0
+
+
+def _hold(cell: Cell) -> None:
+    """Target the measured pose: no spring, only damping -- the arm stops where it is."""
+    with cell.lock:
+        pose = cell.pose
+    if pose is not None:
+        cell.publish(pose[1], pose[2])
 
 
 def main() -> int:
@@ -485,16 +522,18 @@ def main() -> int:
     rep.add_argument("--floor-z", type=float, default=0.20)
     rep.add_argument("--abort-m", type=float, default=0.10)
     rep.add_argument("--abort-deg", type=float, default=30.0)
-    rep.add_argument("--abort-speed", type=float, default=0.6,
-                     help="fraction of a joint's velocity limit that stops the sweep")
+    rep.add_argument("--abort-speed", type=float, default=0.8,
+                     help="fraction of a joint's velocity limit that aborts a run")
     args = parser.parse_args()
-    rclpy.init()
+    # No rclpy signal handlers: they shut the context down on ^C, and the gains could then not
+    # be restored. ^C is a KeyboardInterrupt here, and the finally blocks run with ROS alive.
+    rclpy.init(signal_handler_options=rclpy.signals.SignalHandlerOptions.NO)
     try:
         return record(args) if args.cmd == "record" else replay(args)
     finally:
-        for executor in _EXECUTORS:
-            executor.shutdown(timeout_sec=1.0)
         rclpy.try_shutdown()
+        for cell in _CELLS:
+            cell.spinner.join(timeout=2.0)
 
 
 if __name__ == "__main__":
