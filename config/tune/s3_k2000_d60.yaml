@@ -1,0 +1,12 @@
+# Model: 93 ms pos.
+# Sweep 3 (26 Sep 2026). Sweep 2 fits lag ~= (d_pos + ~125 N s/m)/k_pos: baseline 160 ms,
+# k2000/d130 130 ms. Something under crisp -- KUKA's joint-impedance damping beneath the FRI
+# torque overlay is the suspect -- adds ~125 N s/m, so lag falls with k up and crisp's d DOWN.
+# Rotation likewise (d_rot + ~9)/k_rot = 290 ms; k_rot is capped at 100 by crisp's validation.
+/lbr/cartesian_impedance_controller:
+  ros__parameters:
+    variable_max_stiffness: {translational: 3500.0, rotational: 100.0}
+    task:
+      {k_pos_x: 2000.0, k_pos_y: 2000.0, k_pos_z: 2000.0, d_pos_x: 60.0, d_pos_y: 60.0, d_pos_z: 60.0,
+       k_rot_x: 100.0, k_rot_y: 100.0, k_rot_z: 100.0, d_rot_x: 10.0, d_rot_y: 10.0, d_rot_z: 10.0}
+  replay: {lead: false, max_error_m: null}
