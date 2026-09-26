@@ -66,15 +66,22 @@
     # Damping then raised again at the operator's request (110 -> 140, 20 -> 25), for a calmer,
     # safer arm with force feedback on; by the sweep fit that costs ~12 ms / ~20 ms of lag.
     #
+    # Translation stiffened 2500/140 -> 4000/200 the same evening, after the first gripper
+    # session found small hand movements dead: FRI torque mode leaves ~15 N of joint friction at
+    # the tool that the spring must overcome before the arm moves, so it held 6.0 mm off a still
+    # target and answered 1-3 mm steps 405 ms late (sweep 6b, steps1). 4000: 3.5 mm, 130 ms,
+    # stable (sweep 7). 5000 gained little more and doubles the contact force per mm; 450/38 in
+    # rotation oscillated the wrist, so rotation stays 250/25.
+    #
     # Rotation above 100 needs patches/crisp_controllers-rotational-stiffness-ceiling.patch:
     # variable_max_stiffness.rotational was validated to [0, 100] and clamps k_rot.
     task:
-      k_pos_x: 2500.0
-      k_pos_y: 2500.0
-      k_pos_z: 2500.0
-      d_pos_x: 140.0
-      d_pos_y: 140.0
-      d_pos_z: 140.0
+      k_pos_x: 4000.0
+      k_pos_y: 4000.0
+      k_pos_z: 4000.0
+      d_pos_x: 200.0
+      d_pos_y: 200.0
+      d_pos_z: 200.0
       k_rot_x: 250.0
       k_rot_y: 250.0
       k_rot_z: 250.0
@@ -82,7 +89,7 @@
       d_rot_y: 25.0
       d_rot_z: 25.0
     variable_max_stiffness:
-      translational: 2500.0
+      translational: 4000.0
       rotational: 250.0
     # The Haply target arrives in 30 Hz steps of up to 8 mm; at this stiffness each was a kick.
     # EMA weight on the PREVIOUS desired pose per 2 ms cycle (launch 0.1): 0.9 ramps a step over

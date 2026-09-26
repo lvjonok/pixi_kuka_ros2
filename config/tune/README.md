@@ -21,3 +21,29 @@ faster but was erratic by hand and a rapid stroke tripped the driver's velocity 
 `--restore` from now on; `baseline.yaml` is the pre-tuning launch.
 Then damping raised for safety with force feedback on (d 110 -> 140, d_rot 20 -> 25):
 `launch.yaml` mirrors what controllers_umi.yaml launches; use it as `--restore`.
+
+## Small motions: sweeps 6-7 (26 Sep 2026, evening)
+
+The first session with the real gripper found small hand movements dead. `track_tune.py fine`
+scores what the lag average hides: the **hold** offset once the target has been still 1 s, and
+the delay to half of each 0.5-10 mm target move. On the operator's own small moves (fine1) the
+arm stuck 4-6 mm off a still target with no external force and stick-slipped. `steps1`
+(`track_tune.py steps`: 1/3 mm and 0.5/2 deg steps about one pose) replayed:
+
+| run | translation | rotation | hold p50 | step delay p50 / p90 |
+|---|---|---|---|---|
+| 6b launch | 2500/140 | 250/25 | 6.0 mm | 405 / 637 ms |
+| 6b | 3500/170 | 350/30 | 4.8 mm | 140 / 440 ms |
+| 6b | 5000/230 | 450/38 | 2.9 mm | 110 / 260 ms -- wrist oscillated on a 2 deg step, A3 81 %, aborted |
+| 7 | **4000/200** | 250/25 | **3.5 mm** | **130 / 220 ms** |
+| 7 | 5000/230 | 250/25 | 3.3 mm | 100 / 320 ms |
+
+hold x k is ~15 N in every run: joint friction. At rest `/lbr/lbr_state` showed crisp's 1-2 Nm
+per joint in the commanded torque and not in the measured one (external torque ~0), with the
+commanded joint position equal to the measured -- the KUKA's joint spring holds nothing. A
+stiffer spring breaks it sooner; nothing in crisp compensates it at standstill (`noise` is
+declared but unimplemented, the friction model is velocity-driven with Franka values).
+
+**Adopted:** 4000/200 translation, rotation unchanged -- `controllers_umi.yaml` and `launch.yaml`.
+The next lever, if it is still sticky, is an integral term on the task error in crisp (clamped
+to ~15 N, reset on re-engage).
