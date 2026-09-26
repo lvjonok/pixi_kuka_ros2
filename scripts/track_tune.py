@@ -75,6 +75,8 @@ CARTESIAN = "cartesian_impedance_controller"
 BASE_FRAME = "lbr_link_0"
 JOINT_NAMES = tuple(f"lbr_A{i + 1}" for i in range(7))
 RATE_HZ = 100.0
+# Stopped before rclpy shuts down: an executor still spinning when the context goes segfaults.
+_EXECUTORS: list[SingleThreadedExecutor] = []
 
 
 # -- recording file ------------------------------------------------------------------------
@@ -122,6 +124,7 @@ class Cell(Node):
             self.create_subscription(PoseStamped, TARGET_TOPIC, self._on_target, 10)
         self.executor_ = SingleThreadedExecutor()
         self.executor_.add_node(self)
+        _EXECUTORS.append(self.executor_)
         threading.Thread(target=self.executor_.spin, daemon=True).start()
 
     def _on_pose(self, msg: PoseStamped) -> None:
@@ -489,6 +492,8 @@ def main() -> int:
     try:
         return record(args) if args.cmd == "record" else replay(args)
     finally:
+        for executor in _EXECUTORS:
+            executor.shutdown(timeout_sec=1.0)
         rclpy.try_shutdown()
 
 
