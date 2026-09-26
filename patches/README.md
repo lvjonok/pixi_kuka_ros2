@@ -83,3 +83,23 @@ git -C src/crisp_controllers am < patches/crisp_controllers-rotational-stiffness
 pixi run -e jazzy colcon build --base-paths . src --packages-select crisp_controllers \
   --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
 ```
+
+## crisp_controllers-activate-zeroes-torque.patch
+
+Applies on top of the rotational-ceiling patch.
+
+**Safety.** `tau_previous` seeds both the torque-rate limit and the output filter, and only
+`on_configure` zeroed it, so each activation started from the torque the previous one ended on.
+With `filter.output_torque` 0.2 (weight 0.8 on the previous value per cycle) that stale torque
+was replayed for tens of milliseconds. 26 Sep 2026: after a session that ended pressing a block,
+lerobot_pickplace's `kuka_cell.py arm` refused twice -- the camera moved 7-11 mm within 0.3 s of
+arming. Both controllers now zero it in `on_activate`. Zero is the neutral overlay: the robot
+controller compensates gravity under the FRI torque overlay.
+
+Re-apply after a fresh import, after the rotational-ceiling patch:
+
+```bash
+git -C src/crisp_controllers am < patches/crisp_controllers-activate-zeroes-torque.patch
+pixi run -e jazzy colcon build --base-paths . src --packages-select crisp_controllers \
+  --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+```

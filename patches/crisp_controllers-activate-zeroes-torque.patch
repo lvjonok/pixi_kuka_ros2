@@ -1,0 +1,55 @@
+From c63c02e20b6de67d7cb46152f99b7911e9585e61 Mon Sep 17 00:00:00 2001
+From: Lev Kozlov <kozlov.l.a10@gmail.com>
+Date: Sat, 26 Sep 2026 16:00:53 +0900
+Subject: [PATCH] fix: on_activate starts the output filter from zero torque,
+ not the last session's
+
+tau_previous seeds both the torque-rate limit and the output EMA, and was zeroed only in
+on_configure. An activation therefore began from whatever torque the previous activation ended
+on and replayed it while the filter decayed. On a KUKA iiwa (26 Sep 2026), after a session that
+ended pressing a block, arming moved the endpoint 7-11 mm within 0.3 s.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01PYsbnsZbpqrrGZhLJYaMks
+---
+ src/cartesian_admittance_controller.cpp | 6 ++++++
+ src/cartesian_controller.cpp            | 6 ++++++
+ 2 files changed, 12 insertions(+)
+
+diff --git a/src/cartesian_admittance_controller.cpp b/src/cartesian_admittance_controller.cpp
+index e081ceb..9936aed 100644
+--- a/src/cartesian_admittance_controller.cpp
++++ b/src/cartesian_admittance_controller.cpp
+@@ -800,6 +800,12 @@ CartesianAdmittanceController::on_activate(const rclcpp_lifecycle::State & /*pre
+   new_target_joint_ = false;
+   new_target_wrench_ = false;
+   target_wrench_.setZero();
++  // The output filter and the torque-rate limit both start from tau_previous, which only
++  // on_configure zeroed: an activation began from the torque the LAST session ended on and
++  // replayed it for tens of ms (filter.output_torque weights the previous value 0.8 per cycle).
++  // On the KUKA on 26 Sep 2026, after a session that ended pressing a block, arming moved the
++  // camera 7-11 mm in 0.3 s. Start from zero, as on_configure does.
++  tau_previous = Eigen::VectorXd::Zero(model_.nv);
+ 
+   // Reset admittance state so it reinitializes on first update cycle
+   admittance_initialized_ = false;
+diff --git a/src/cartesian_controller.cpp b/src/cartesian_controller.cpp
+index 212a84c..5cab06b 100644
+--- a/src/cartesian_controller.cpp
++++ b/src/cartesian_controller.cpp
+@@ -687,6 +687,12 @@ CartesianController::on_activate(const rclcpp_lifecycle::State & /*previous_stat
+   new_target_joint_ = false;
+   new_target_wrench_ = false;
+   target_wrench_.setZero();
++  // The output filter and the torque-rate limit both start from tau_previous, which only
++  // on_configure zeroed: an activation began from the torque the LAST session ended on and
++  // replayed it for tens of ms (filter.output_torque weights the previous value 0.8 per cycle).
++  // On the KUKA on 26 Sep 2026, after a session that ended pressing a block, arming moved the
++  // camera 7-11 mm in 0.3 s. Start from zero, as on_configure does.
++  tau_previous = Eigen::VectorXd::Zero(model_.nv);
+ 
+   RCLCPP_INFO(get_node()->get_logger(), "Controller activated.");
+   return CallbackReturn::SUCCESS;
+-- 
+2.43.0
+
