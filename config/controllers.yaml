@@ -175,7 +175,10 @@
     base_frame: lbr_link_0
 
     filter:
-      target_pose: 0.1
+      # 0.9, 21 Oct 2026 (was 0.1): the yubi glove teleop's value (yubi deploy/teleop/gains/
+      # soft_k1300_r60_f09.yaml), as the default so a relaunch no longer reverts it. EMA weight on
+      # the PREVIOUS desired pose per 2 ms cycle: ramps a 30 Hz target step over ~20 ms.
+      target_pose: 0.9
       q: 0.2
       dq: 0.2
       q_ref: 0.2
@@ -236,13 +239,16 @@
       d_rot_y: 15.5
       d_rot_z: 15.5
 
+      # 0.02 m / 0.05 rad per axis with limit_error true, 21 Oct 2026 (was 0.1 / 0.5, unused with
+      # limit_error false): the yubi glove teleop's backstop, error_clip x k = 26 N / 3 Nm. It also
+      # caps what any other tool:=none client can pull with (excitation, the Haply bridge).
       error_clip:
-        x: 0.1
-        y: 0.1
-        z: 0.1
-        rx: 0.5
-        ry: 0.5
-        rz: 0.5
+        x: 0.02
+        y: 0.02
+        z: 0.02
+        rx: 0.05
+        ry: 0.05
+        rz: 0.05
 
     nullspace:
       # 30, 19 Sep 2026 (was 5). At 5 Nm/rad the elbow was held by friction, not by this term:
@@ -298,7 +304,7 @@
       rotational: 60.0
 
     max_delta_tau: 2.0
-    limit_error: false
+    limit_error: true  # 21 Oct 2026 (was false): task.error_clip above
     limit_torques: true
     use_friction: false
     # FRI torque commands are overlays on KUKA's joint-impedance controller.

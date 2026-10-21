@@ -96,3 +96,6 @@
     # ~20 ms, which is ~20 ms of lag.
     filter:
       target_pose: 0.9
+    # controllers.yaml turned limit_error on for the glove teleop (21 Oct 2026, error_clip 0.02 m /
+    # 0.05 rad). At this k that would be an 80 N / 12.5 Nm cap no UMI run was tuned for: off, as before.
+    limit_error: false
