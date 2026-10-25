@@ -32,6 +32,8 @@ All run as `pixi run -e jazzy <task>`. Arbitrary commands work too, for example
 | --- | --- | --- |
 | `setup` | Import sources and build. Idempotent. | no |
 | `sources` / `build` | The two halves of `setup`. | no |
+| `test-controllers` | Rebuild this package with tests on and run its gtests (the `position_source` law). Run `build` first. | no |
+| `test-scripts` | pytest of the operator scripts' decision logic (`test/*.py`), against fakes, no ROS graph. | no |
 | `mock` | Mock hardware bringup, no cabinet required. | no |
 | `mock-loopback` | As `mock`, DDS pinned to loopback for single-host use. | no |
 | `hardware` | Real FRI bringup. Requires `LBRServer` on the smartPAD. | no, but arms the robot |
@@ -41,6 +43,8 @@ All run as `pixi run -e jazzy <task>`. Arbitrary commands work too, for example
 | `session` | Controller states, joint positions, EE pose, pre-torque gate. | no |
 | `session --home` | **MOVES THE ARM** to the home configuration. | **yes** |
 | `session --switch <name>` | Safe switch, holding the FRI passthrough active. | no |
+| `position-source status` | What the passthrough writes into FRI's position field: its parameters, its state, the running mode. | no |
+| `position-source set <measured\|lagged\|ik_target> [--param name=value ...]` | At REST only: sets the mode for the next arm, reads it back. [`docs/controllers.md`](docs/controllers.md#what-the-passthrough-writes-position_source) | no, but changes what holds the arm once armed |
 
 ## Bringing up the real robot
 
@@ -127,6 +131,7 @@ time; the position passthrough stays active for both.
 | [`sunrise_setup.md`](docs/sunrise_setup.md) | Windows-side `LBRServer` install, network requirements, X66 reachability debugging |
 | [`commissioning_protocol.md`](docs/commissioning_protocol.md) | Startup procedure, position referencing, operating modes and safety configuration, the pre-FRI gate, recorded failure modes |
 | [`controllers.md`](docs/controllers.md) | Controller architecture, safe switching, the CRISP Python client |
+| [`position_source.md`](docs/position_source.md) | What the FRI position field carries under the torque overlay (`measured`, `lagged`, `ik_target`), and the cell test |
 | [`remote_access.md`](docs/remote_access.md) | Running the bringup over SSH |
 
 ## License

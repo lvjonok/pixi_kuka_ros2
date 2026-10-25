@@ -355,6 +355,20 @@ and update the cell documentation.
   leave the arm held only by ROS-side torque commands. That materially changes the
   safety picture and requires the risk assessment to be revisited. Do not treat it as a
   tuning tweak.
+- **`position_source: ik_target` and a stiffer Sunrise app change the picture too**
+  ([`position_source.md`](position_source.md)). Under `measured` that spring is centred on the
+  measured position and applies nothing. Under `ik_target` (and, by a little, `lagged`) the
+  position command leads the arm, and the gap times Sunrise's stiffness is a joint torque the
+  robot applies on top of crisp's overlay. Nothing in lbr_fri_ros2's command guard checks that
+  gap; the passthrough's own gap clamp (`max_spring_torque_nm / sunrise_joint_stiffness` per
+  joint) is the guard, and it is ROS-side software like the guards above. Raising Sunrise's
+  stiffness (`LBRServerJointImpedance`'s presets above 200 Nm/rad) is a stiffness change in the
+  same sense as lowering it: it needs the same revisit of the risk assessment before it runs,
+  and `sunrise_joint_stiffness` changed to match in the same step. Raising
+  `max_spring_torque_nm` above the specification's defaults is a limit change, not a tuning
+  step. `position-source set` refuses any such change for `lagged` and `ik_target` (a stiffness
+  other than 200, a larger `max_spring_torque_nm`, a wider gap, a larger `max_joint_step_rad`)
+  unless given `--limit-change-reviewed`, which is for after this review.
 - **Every safety stop kills the FRI session** and needs a full `lbr_bringup` relaunch
   plus the four smartPAD dialogs. Budget for it in the tuning loop.
 

@@ -67,6 +67,73 @@ interface unclaimed is not a safe stop — the arm keeps the last overlay it was
 The gains in `config/controllers.yaml` are deliberately conservative starting values,
 not validated gains for any particular payload.
 
+## What the passthrough writes: `position_source`
+
+In `TORQUE` command mode Sunrise runs its joint impedance spring (200 Nm/rad on this cell)
+around the position FRI carries and adds the overlay on top. `position_source`, a parameter of
+`fri_position_passthrough_controller`, chooses that position. The specification, with every
+default and the IK law, is [`position_source.md`](position_source.md).
+
+| mode | the position field carries | Sunrise's spring |
+| --- | --- | --- |
+| `measured` (default) | the measured position, exactly as before | holds nothing; crisp's overlay holds the arm |
+| `lagged` | a first-order low-pass of the measured position (`lag_time_constant_s`; the 8 ms default is Drake's IIR) | a small gap that trails any motion, which KUKA's friction compensation reportedly needs |
+| `ik_target` | the differential IK of crisp's `/lbr/target_pose`, integrated on the controller's own `q_ik` | pulls toward the target as well, within the gap clamp |
+
+The parameters, by name:
+
+- every mode: `position_source`;
+- `lagged`: `lag_time_constant_s`;
+- `ik_target`: `target_topic`, `end_effector_frame` and `base_frame` (all three must match
+  `cartesian_impedance_controller`'s; `controllers_umi.yaml` moves `end_effector_frame` to
+  `lbr_umi_camera` with crisp's), `target_filter` (as crisp's `filter.target_pose`), `target_timeout_s` (a stale
+  target returns the output to the measured position), `ik_damping`, `nullspace_gain`,
+  `joint_limit_margin_rad`;
+- every mode but `measured`: `max_joint_step_rad` (7 values), the per-update change of the
+  output, and the gap clamp `|q_out - q_meas| <= max_spring_torque_nm / sunrise_joint_stiffness`
+  per joint (0.05 rad on A1-A3 at the defaults), which has the last word: the step limit gives
+  way when the arm itself moves faster. `sunrise_joint_stiffness` is **not** read from the
+  robot: it must match the Sunrise app that is running.
+
+They are read at activation, so a change takes effect at the next REST -> ARMED, and every
+activation logs the mode. Change them at REST only, through `scripts/position_source.py`. It
+refuses anywhere else, checks the values (and, for `ik_target`, the frames and topic against
+crisp's), sets them atomically and reads them back. It moves nothing and switches nothing. For
+`lagged` and `ik_target` it refuses anything looser than the defaults' spring-torque guard unless
+given `--limit-change-reviewed` (docs/commissioning_protocol.md).
+
+Only `cartesian_impedance_controller` may run over a passthrough that is not in `measured`:
+`kuka_crisp.safe_switch` refuses `joint_impedance_controller` otherwise. While `/lbr/target_pose`
+has more than one publisher, `ik_target` ignores it, as crisp does, and falls back to `measured`.
+Deactivating the passthrough (ARMED -> REST) leaves the measured position in the command, so
+`joint_trajectory_controller` holds the arm where it stands.
+
+```bash
+pixi run -e jazzy position-source status       # parameters, controller state, running mode
+pixi run -e jazzy position-source set lagged
+pixi run -e jazzy position-source set ik_target --param target_timeout_s=0.2
+pixi run -e jazzy position-source set measured # before any yubi session
+```
+
+A relaunch returns to `config/controllers.yaml`. yubi's teleop and policy sessions assume
+`measured` and do not check it yet.
+
+Diagnostics: `/lbr/fri_position_passthrough_controller/state`, a `std_msgs/Float64MultiArray`
+published every update; `layout.dim[0].label` names the layout:
+
+```text
+[0]      mode             0 measured, 1 lagged, 2 ik_target
+[1]      stale            1 while ik_target has no fresh target (output: the measured position)
+[2:9]    q_meas[7]
+[9:16]   q_ik[7]
+[16:23]  q_out[7]         what went into the position command
+[23:30]  gap_clamped[7]   1 where the gap clamp cut q_out this update
+[30:37]  step_clamped[7]  1 where max_joint_step_rad cut it
+```
+
+`position-source status` reads the running mode from it while the passthrough is active, and
+says when the parameter differs (a change waiting for the next arm).
+
 ## Command limits are disabled on purpose
 
 Jazzy's outer command limiter (`enforce_command_limits`) is disabled in **both** mock

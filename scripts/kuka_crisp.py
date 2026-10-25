@@ -50,6 +50,11 @@ HOME_DEGREES = [0.0, 30.0, 0.0, -75.0, 0.0, 75.0, 0.0]
 PASSTHROUGH = "fri_position_passthrough_controller"
 TRAJECTORY = "joint_trajectory_controller"
 ZERO_EFFORT = "zero_effort_controller"
+CARTESIAN = "cartesian_impedance_controller"
+
+# The passthrough's position_source values, in the order of the mode slot of its ~/state
+# (docs/position_source.md).
+POSITION_SOURCES = ("measured", "lagged", "ik_target")
 
 # Controllers that write a torque overlay. None of them may be active during a
 # trajectory move: the move commands positions, and a simultaneous overlay would
@@ -104,8 +109,11 @@ def safe_switch(robot: Robot, controller_name: str) -> bool | None:
       arm. This is what the stack starts in (launch/crisp_hardware.launch.py) and where
       --home leaves it.
     * ARMED: fri_position_passthrough_controller + a torque overlay (the CRISP controllers).
-      The passthrough mirrors the measured position, so Sunrise contributes nothing and the
-      overlay holds the arm.
+      The passthrough writes its position_source (docs/position_source.md): by default the
+      measured position, so Sunrise contributes nothing and the overlay holds the arm. Its other
+      modes are for cartesian_impedance_controller only (``ik_target`` pulls toward the IK of
+      /lbr/target_pose, which no other overlay tracks), so any other overlay is refused unless
+      the passthrough is in ``measured``.
 
     passthrough + zero_effort -- the old resting state -- holds NOTHING: Sunrise's spring is
     centred on where the arm already is. The bare arm sagged in it (17 Sep 2026); with the UMI
@@ -117,6 +125,7 @@ def safe_switch(robot: Robot, controller_name: str) -> bool | None:
 
     if TRAJECTORY in active:
         if controller_name in TORQUE_CONTROLLERS:
+            check_position_source(robot, controller_name, armed=False)
             # REST -> ARMED in one step: the overlay and the passthrough take over at the same
             # control cycle the fixed setpoint and the zero overlay are released.
             strict_switch(
@@ -149,10 +158,99 @@ def safe_switch(robot: Robot, controller_name: str) -> bool | None:
         )
         return True
 
+    # ARMED -> another overlay: crisp_py's BEST_EFFORT switch keeps the passthrough active in the
+    # mode it was activated with.
+    check_position_source(robot, controller_name, armed=True)
     return robot.controller_switcher_client.switch_controller(
         controller_name,
         controllers_that_should_be_active=HOLD_ACTIVE,
     )
+
+
+def position_source_problem(
+    controller_name: str, parameter: str | None, running: str | None, armed: bool
+) -> str | None:
+    """Why ``controller_name`` must not run over the passthrough's position_source, or None.
+
+    ``parameter`` is the passthrough's position_source parameter (None: a build that predates it,
+    which always writes the measured position); ``running`` the mode its ~/state reports (None:
+    none heard), consulted while ``armed``, when the parameter may differ from the active mode.
+    """
+    if controller_name == CARTESIAN or parameter is None:
+        return None
+    why = (
+        f"{controller_name} does not track /lbr/target_pose, and only {CARTESIAN} may run over "
+        f"a passthrough that is not in `measured`: under ik_target Sunrise's spring would pull "
+        f"toward a pose the overlay is not following. REST and "
+        f"`pixi run -e jazzy position-source set measured` first"
+    )
+    if parameter != "measured":
+        return f"{PASSTHROUGH} position_source is {parameter}: {why}"
+    if armed and running != "measured":
+        return f"{PASSTHROUGH} is running {running or 'an unknown mode (no ~/state)'}: {why}"
+    return None
+
+
+def position_source_modes(robot: Robot, armed: bool, timeout: float = 2.0) -> tuple:
+    """(the passthrough's position_source parameter, the mode its ~/state reports).
+
+    The parameter is None when it is not declared (a build that predates it); the running mode
+    is read only while ``armed``, and is None if no ~/state arrived within ``timeout``.
+    """
+    from rcl_interfaces.msg import ParameterType
+    from rcl_interfaces.srv import GetParameters
+    from rclpy.qos import qos_profile_sensor_data
+    from std_msgs.msg import Float64MultiArray
+
+    node = robot.node
+    client = node.create_client(GetParameters, f"{PASSTHROUGH}/get_parameters")
+    try:
+        if not client.wait_for_service(timeout_sec=timeout):
+            raise RuntimeError(f"{PASSTHROUGH}/get_parameters is not available.")
+        future = client.call_async(GetParameters.Request(names=["position_source"]))
+        deadline = time.monotonic() + timeout
+        while not future.done():
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"{PASSTHROUGH}/get_parameters did not answer.")
+            time.sleep(0.01)
+        values = future.result().values
+    finally:
+        node.destroy_client(client)
+    parameter = (
+        values[0].string_value
+        if values and values[0].type == ParameterType.PARAMETER_STRING
+        else None
+    )
+
+    running = None
+    if armed:
+        heard: list = []
+        subscription = node.create_subscription(
+            Float64MultiArray,
+            f"{PASSTHROUGH}/state",
+            lambda message: heard.append(list(message.data)),
+            qos_profile_sensor_data,
+        )
+        try:
+            deadline = time.monotonic() + timeout
+            while not heard and time.monotonic() < deadline:
+                time.sleep(0.01)
+        finally:
+            node.destroy_subscription(subscription)
+        if heard and heard[-1] and 0 <= int(heard[-1][0]) < len(POSITION_SOURCES):
+            running = POSITION_SOURCES[int(heard[-1][0])]
+    return parameter, running
+
+
+def check_position_source(robot: Robot, controller_name: str, armed: bool) -> None:
+    """Raise unless ``controller_name`` may run over the passthrough's position_source."""
+    if controller_name == CARTESIAN:
+        return
+    problem = position_source_problem(
+        controller_name, *position_source_modes(robot, armed), armed=armed
+    )
+    if problem:
+        raise RuntimeError(f"refusing to switch to {controller_name}: {problem}")
 
 
 def active_controllers(robot: Robot) -> set[str]:
