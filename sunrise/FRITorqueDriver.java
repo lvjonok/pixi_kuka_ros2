@@ -1,4 +1,5 @@
-// From RobotLocomotion/drake-iiwa-driver, kuka-driver/sunrise_1.14/DrakeFRITorqueDriver.java.
+// From RobotLocomotion/drake-iiwa-driver, kuka-driver/sunrise_1.14/DrakeFRITorqueDriver.java,
+// renamed FRITorqueDriver (class and file; package drake_fri kept).
 // Two changes for this cell, nothing else:
 //   - client IP 192.170.10.200 -> 172.31.1.148 (iris, the address LBRServer's dialog uses);
 //   - send period 5 ms -> 2 ms, the period lbr_fri_ros2 and the controllers (update_rate 500)
@@ -29,7 +30,7 @@ import com.kuka.roboticsAPI.motionModel.controlModeModel.JointImpedanceControlMo
 /**
  * Creates a FRI Session.
  */
-public class DrakeFRITorqueDriver extends RoboticsAPIApplication {
+public class FRITorqueDriver extends RoboticsAPIApplication {
     private Controller _lbrController;
     private LBR _lbr;
     private String _clientName;
@@ -93,7 +94,7 @@ public class DrakeFRITorqueDriver extends RoboticsAPIApplication {
     }
 
     public static void main(final String[] args) {
-        final DrakeFRITorqueDriver app = new DrakeFRITorqueDriver();
+        final FRITorqueDriver app = new FRITorqueDriver();
         app.runApplication();
     }
 }
