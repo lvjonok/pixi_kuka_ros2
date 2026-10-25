@@ -293,6 +293,82 @@ behaviour. Lowering it toward zero means the arm is held only by the ROS-side to
 commands, which is a separate commissioning decision with its own safety review, not
 a tuning tweak.
 
+## Second app: `LBRServerJointImpedance` (stiffness and damping presets)
+
+[`sunrise/LBRServerJointImpedance.java`](../sunrise/LBRServerJointImpedance.java) is
+`LBRServer` with the control mode fixed to `JOINT_IMPEDANCE_CONTROL` and the command mode to
+`TORQUE`, plus a stiffness and a damping preset dialog
+([`position_source.md`](position_source.md#sunrise-side-second-app-optional-for-stiffness-above-200)).
+It is installed **beside** `LBRServer`, which stays as it is and remains the app to run unless
+a test calls for another preset. The file has **not been compiled**: there is no Sunrise SDK on
+Linux, so the first build is the Workbench one below.
+
+### Install: sync applications only
+
+1. Load the project from the cabinet and archive an untouched copy, as in steps 1-2 of the
+   [Procedure](#procedure). Record the safety configuration checksum (step 3).
+2. Open the retrieved `src/lbr_fri_ros2/LBRServer.java` and read its
+   `JointImpedanceControlMode(...)` line and any `setDampingForAllJoints(...)` call. The first
+   entry of each preset dialog is meant to be exactly that: 200 Nm/rad on every joint and
+   damping 0.3. The 0.3 is the operator's recollection of the 26 Sep 2026 change
+   ([`config/tune/README.md`](../config/tune/README.md), sweep 5), not a value read from the
+   cabinet. If the cabinet's copy differs, edit the first entries of `stiffness_presets_` /
+   `damping_presets_` (and their labels) to match it before going on. **No
+   `setDampingForAllJoints(...)` call means damping 0.7**, KUKA's default for a
+   `JointImpedanceControlMode` (the stock lbr-stack `ros2-fri-1.15` `LBRServer.java` has none).
+   Then today is 0.7, not 0.3: make the first damping preset `0.7` labelled `0.7 (today)`, keep
+   `0.3` as a separate option (drop the now duplicate `0.7 (KUKA default)` entry), and correct
+   the "damping 0.3" in [`position_source.md`](position_source.md) and the app's header comment.
+3. Copy `LBRServerJointImpedance.java` into `src/lbr_fri_ros2/` next to `LBRServer.java`. The
+   package already exists from the `LBRServer` install; the file's first line is
+   `package lbr_fri_ros2;`.
+4. Refresh `src`, confirm both applications compile, and **synchronize applications**. Nothing
+   else: no `StationSetup.cat` install, no option package, no safety configuration edit, no
+   reboot.
+5. Read the safety checksum on the smartPAD again. It must equal step 1's. If it does not,
+   stop and restore the archived project; do not run the app.
+
+**Do not copy Drake's provisioning.** drake-iiwa-driver's README presses `Install` in
+`StationSetup.cat` (which wipes and reboots the cabinet) and unchecks External EMERGENCY STOP,
+Operator Protection and Safety Stop in the Customer PSM. None of that is needed for this app and
+none of it may be done on this cell: the app uses only API calls `LBRServer` and Drake's torque
+driver already make, and goes in by the sync above.
+
+### Run it
+
+Choose `LBRServerJointImpedance` in the smartPAD application list instead of `LBRServer`. The
+[Startup order](#startup-order) is the same (ROS side first, then a 10 second window after the
+last dialog). Four dialogs:
+
+| Dialog | Answer | Options |
+| --- | --- | --- |
+| FRI send period [ms] | `2` | as `LBRServer` |
+| Remote IP address | `172.31.1.148` | as `LBRServer` |
+| Joint impedance stiffness | `200 all (today)` unless the test says otherwise | `200 all (today)`, `500 all`, `1000 A1-A3, 500 A4-A7 (Drake)` |
+| Joint impedance damping | `0.3 (today)` unless the test says otherwise | `0.3 (today)`, `0.7 (KUKA default)`, `1.0 (Drake)` |
+
+The first option of each dialog reproduces today's `LBRServer`. The app logs every answer and,
+before holding position, the stiffness array, damping and command mode it runs with; read the
+smartPAD log to confirm them.
+
+### The stiffness rule
+
+**`sunrise_joint_stiffness` of `fri_position_passthrough_controller` must equal the preset the
+app is running.** FRI does not report the stiffness, so the controller cannot read it; it takes
+the parameter on trust and computes its gap clamp from it,
+`|q_cmd - q| <= max_spring_torque_nm / sunrise_joint_stiffness`. A config left at 200 while the
+app runs at 1000 lets through five times the intended spring torque. So:
+
+- Change the preset and the parameter in the same step, with the controller at REST; the
+  parameter takes effect at the next activation. `position-source set` refuses a stiffness other
+  than 200 for `lagged` and `ik_target` unless given `--limit-change-reviewed` (after the review
+  the commissioning protocol requires); it prints the resulting gap and torque first.
+- Write the running preset (stiffness and damping) into the session's notes; damping is not a
+  controller parameter and appears nowhere else.
+- Any preset above 200 only after the safety review
+  [`commissioning_protocol.md`](commissioning_protocol.md) requires, and only with
+  `position_source` validated at 200 first ([`position_source.md`](position_source.md#plan-and-gates)).
+
 ## Network caveat
 
 A 2 ms FRI send period on a switch shared with general lab traffic is exposed to
