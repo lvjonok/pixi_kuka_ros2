@@ -185,8 +185,7 @@ its parent directory, prints the mode.
 ```bash
 MODE=measured                                # then MODE=lagged, then MODE=ik_target
 pixi run -e jazzy position-source set $MODE  # refuses unless at REST
-make -C ~/github.com/lvjonok/yubi/deploy cell-arm   # REST -> ARMED (kuka_cell.py: refuses a
-                                             # target publisher, rests again if the arm moves)
+pixi run -e jazzy python scripts/crisp_session.py --switch cartesian_impedance_controller  # REST -> ARMED
 pixi run -e jazzy position-source status     # "running (~/state): $MODE"; stop if not
 mkdir -p $OUT/steps/$MODE
 
@@ -202,12 +201,14 @@ for R in orig lead_dk lead_meas; do
       --gains $G --restore $G --out $OUT/$R/$MODE
 done
 
-make -C ~/github.com/lvjonok/yubi/deploy cell-rest  # ARMED -> REST, before the next MODE
+pixi run -e jazzy python scripts/crisp_session.py --switch zero_effort_controller  # ARMED -> REST, before the next MODE
 ```
 
-Without the yubi deploy preset, `pixi run -e jazzy session --switch cartesian_impedance_controller`
-arms and `pixi run -e jazzy session --switch zero_effort_controller` rests (the same STRICT
-switches, without kuka_cell's publisher refusal and arming watch).
+`crisp_session.py --switch` is kuka_crisp's STRICT switch, run directly with python: the `session` pixi
+task pins the loopback DDS of the mock and does not reach the cell's stack (domain 42). Before
+arming, `pixi run -e jazzy ros2 topic info /lbr/target_pose` must show 0 publishers. yubi's
+`cell-arm` / `cell-rest` do the same with a publisher refusal and an arming watch, but need a
+training run's `deploy.yubi.yaml` preset.
 
 Between replays nothing publishes `/lbr/target_pose`, so under `ik_target` the passthrough goes
 stale after `target_timeout_s` and writes the measured position; that is the designed fallback.
