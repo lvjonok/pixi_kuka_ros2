@@ -50,6 +50,11 @@
   ros__parameters:
     end_effector_frame: lbr_umi_camera
 
+/**/fri_position_passthrough_controller:
+  ros__parameters:
+    # ik_target solves for the frame crisp tracks: the same pose on /lbr/target_pose.
+    end_effector_frame: lbr_umi_camera
+
 /**/cartesian_impedance_controller:
   ros__parameters:
     end_effector_frame: lbr_umi_camera

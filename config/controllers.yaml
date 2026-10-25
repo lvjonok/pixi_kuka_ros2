@@ -99,6 +99,31 @@
       - lbr_A6
       - lbr_A7
 
+    # What the FRI position field carries under the torque overlay; Sunrise's joint spring
+    # (200 Nm/rad in LBRServer) is centred on it. docs/position_source.md has the law and the
+    # safety notes. Read at configure and at every activation (REST -> ARMED); the active mode is
+    # logged then. measured = the behaviour this controller always had; lagged and ik_target are
+    # under test on the mock and NOT validated on the cell.
+    position_source: measured
+    # lagged: first-order low-pass of the measured position (Drake's IIR is tau 7.94 ms).
+    lag_time_constant_s: 0.008
+    # ik_target: crisp's target (/lbr/target_pose), the IK integrated on the controller's own q.
+    target_topic: target_pose
+    end_effector_frame: lbr_link_ee  # = cartesian_impedance_controller's (controllers_umi.yaml)
+    base_frame: lbr_link_0
+    target_filter: 0.9  # = cartesian_impedance_controller's filter.target_pose
+    target_timeout_s: 0.1
+    ik_damping: 0.01
+    nullspace_gain: 0.05
+    joint_limit_margin_rad: 0.05
+    # Every mode but measured: per-update change of the output (2 rad/s at 500 Hz), per joint.
+    # It gives way to the gap clamp when the arm itself moves faster.
+    max_joint_step_rad: [0.004, 0.004, 0.004, 0.004, 0.004, 0.004, 0.004]
+    # |q_out - q_meas| <= max_spring_torque_nm / sunrise_joint_stiffness per joint: the torque
+    # Sunrise's spring may add. The stiffness is NOT read from the robot; it must match the app.
+    sunrise_joint_stiffness: [200.0, 200.0, 200.0, 200.0, 200.0, 200.0, 200.0]
+    max_spring_torque_nm: [10.0, 10.0, 10.0, 8.0, 5.0, 5.0, 3.0]
+
 /**/joint_trajectory_controller:
   ros__parameters:
     joints:
