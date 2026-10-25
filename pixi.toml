@@ -60,7 +60,10 @@ interfaces = "ros2 control list_hardware_interfaces -c /lbr/controller_manager"
 session = "env CYCLONEDDS_URI=file://$PWD/config/cyclonedds_loopback.xml python scripts/crisp_session.py"
 # What the passthrough writes into FRI's position field (docs/position_source.md): `status`, or
 # `set <measured|lagged|ik_target> [--param name=value ...]`, at REST only. Moves nothing.
-position-source = "env CYCLONEDDS_URI=file://$PWD/config/cyclonedds_loopback.xml python scripts/position_source.py"
+# Talks to whatever stack the shell's DDS settings reach: on the cell host that is the hardware
+# stack (ROS_DOMAIN_ID 42, the LAN interface). Against the loopback mock use position-source-mock.
+position-source = "python scripts/position_source.py"
+position-source-mock = "env ROS_DOMAIN_ID=77 CYCLONEDDS_URI=file://$PWD/config/cyclonedds_loopback.xml python scripts/position_source.py"
 # Read-only viser page: the estimated contact force at the tweezer tips and tau_ext per joint.
 contact-view = "python scripts/contact_view.py"
 # Read-only: joint speeds as lbr_fri_ros2's CommandGuard computes them, naming the joint.
