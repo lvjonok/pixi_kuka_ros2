@@ -1,5 +1,5 @@
 // From RobotLocomotion/drake-iiwa-driver, kuka-driver/sunrise_1.14/DrakeFRITorqueDriver.java,
-// renamed FRITorqueDriver (class and file; package drake_fri kept).
+// renamed FRITorqueDriver (class and file), in package lbr_fri_ros2 beside LBRServer.
 // Two changes for this cell, nothing else:
 //   - client IP 192.170.10.200 -> 172.31.1.148 (iris, the address LBRServer's dialog uses);
 //   - send period 5 ms -> 2 ms, the period lbr_fri_ros2 and the controllers (update_rate 500)
@@ -9,7 +9,7 @@
 // provisioning (StationSetup Install, unchecking Customer PSM rows 1-3) is NOT needed for it.
 // With it running, sunrise_joint_stiffness must be the same seven numbers
 // (docs/position_source.md).
-package drake_fri;
+package lbr_fri_ros2;
 
 // This file is loosely based on the KUKA sample code for the FRI interface.
 
