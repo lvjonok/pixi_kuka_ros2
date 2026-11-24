@@ -20,11 +20,8 @@
 
 namespace pixi_kuka_ros2 {
 
-// Writes the FRI position field. Under the torque overlay Sunrise's joint spring is centred on
-// it, so what it carries is a choice (docs/position_source.md): `measured` (default, the
-// behaviour this controller always had), `lagged`, or `ik_target` (the IK of crisp's target).
-// The law lives in PositionSource; this class owns the interfaces, the target subscription and
-// ~/state.
+// FRI's torque mode takes a joint position with every torque overlay, and Sunrise's joint spring
+// is centred on it. This controller writes that position.
 class FRIPositionPassthroughController : public controller_interface::ControllerInterface {
  public:
   controller_interface::CallbackReturn on_init() override {
@@ -44,9 +41,6 @@ class FRIPositionPassthroughController : public controller_interface::Controller
       auto_declare<std::vector<double>>(
           "sunrise_joint_stiffness", defaults.sunrise_joint_stiffness);
       auto_declare<std::vector<double>>("max_spring_torque_nm", defaults.max_spring_torque_nm);
-      // One per joint. A YAML override is declared from the file before this runs, with the
-      // file's type and that type fixed, so a dynamically typed declaration here would never
-      // take effect; read_parameters still takes a scalar override for every joint.
       auto_declare<std::vector<double>>("max_joint_step_rad", defaults.max_joint_step_rad);
     } catch (const std::exception &exception) {
       RCLCPP_ERROR(get_node()->get_logger(), "Initialization failed: %s", exception.what());
@@ -81,8 +75,6 @@ class FRIPositionPassthroughController : public controller_interface::Controller
       return controller_interface::CallbackReturn::ERROR;
     }
 
-    // The model `ik_target` integrates on: the controller manager's robot_description, the same
-    // document crisp builds its model from. Without one the other modes still work.
     std::string error;
     source_ = PositionSource();
     if (get_robot_description().empty()) {
@@ -121,8 +113,7 @@ class FRIPositionPassthroughController : public controller_interface::Controller
 
   controller_interface::CallbackReturn on_activate(
       const rclcpp_lifecycle::State &) override {
-    // Parameters are re-read here, so a change takes effect at the next REST -> ARMED. A bad
-    // one is FAILURE, not ERROR: the controller stays inactive and configured, and arms again
+    // FAILURE, not ERROR: ros2_control then leaves the controller configured, and it activates
     // once the parameter is fixed.
     std::string error;
     if (!configure_source(&error)) {
@@ -162,11 +153,10 @@ class FRIPositionPassthroughController : public controller_interface::Controller
 
   controller_interface::CallbackReturn on_deactivate(
       const rclcpp_lifecycle::State &) override {
-    // ARMED -> REST: joint_trajectory_controller activates in the same switch, after this, and
-    // holds the position command it finds there (set_last_command_interface_value_as_state_on_
-    // activation, default true). Leave it the measured position, as `measured` always did: q_out
-    // can be up to the gap away, and REST would hold that spring torque for as long as it lasts.
-    // The interfaces are still claimed here; the controller manager releases them afterwards.
+    // joint_trajectory_controller activates in the same switch, after this, and holds the
+    // position command it finds (set_last_command_interface_value_as_state_on_activation).
+    // q_out can be up to the gap from the measured position, and REST would hold that spring
+    // torque: leave it the measured position.
     if (!read_measured_positions()) {
       RCLCPP_ERROR(get_node()->get_logger(),
                    "Deactivating without a measured position: the position command keeps the "
@@ -185,9 +175,7 @@ class FRIPositionPassthroughController : public controller_interface::Controller
 
   controller_interface::return_type update(
       const rclcpp::Time &, const rclcpp::Duration &period) override {
-    if (!read_measured_positions()) {
-      return controller_interface::return_type::ERROR;
-    }
+    read_measured_positions();
 
     const TargetSample &sample = *target_buffer_.readFromRT();
     const bool new_target = sample.seq > last_target_;
@@ -208,8 +196,6 @@ class FRIPositionPassthroughController : public controller_interface::Controller
   }
 
  private:
-  // What the subscription hands the realtime loop: plain data, so a read never allocates.
-  // seq counts received targets; 0 is "none".
   struct TargetSample {
     std::uint64_t seq = 0;
     double position[3] = {0.0, 0.0, 0.0};
@@ -237,27 +223,7 @@ class FRIPositionPassthroughController : public controller_interface::Controller
         node->get_parameter("sunrise_joint_stiffness").as_double_array();
     params->max_spring_torque_nm = node->get_parameter("max_spring_torque_nm").as_double_array();
 
-    const auto step = node->get_parameter("max_joint_step_rad");
-    switch (step.get_type()) {
-      case rclcpp::ParameterType::PARAMETER_DOUBLE:
-        params->max_joint_step_rad.assign(joints_.size(), step.as_double());
-        break;
-      case rclcpp::ParameterType::PARAMETER_INTEGER:
-        params->max_joint_step_rad.assign(joints_.size(), static_cast<double>(step.as_int()));
-        break;
-      case rclcpp::ParameterType::PARAMETER_DOUBLE_ARRAY:
-        params->max_joint_step_rad = step.as_double_array();
-        break;
-      case rclcpp::ParameterType::PARAMETER_INTEGER_ARRAY:
-        params->max_joint_step_rad.clear();
-        for (const auto value : step.as_integer_array()) {
-          params->max_joint_step_rad.push_back(static_cast<double>(value));
-        }
-        break;
-      default:
-        *error = "max_joint_step_rad must be a double or a double array.";
-        return false;
-    }
+    params->max_joint_step_rad = node->get_parameter("max_joint_step_rad").as_double_array();
     if (topic->empty()) {
       *error = "target_topic must not be empty.";
       return false;
@@ -265,8 +231,6 @@ class FRIPositionPassthroughController : public controller_interface::Controller
     return true;
   }
 
-  // Reads every parameter into the source and (re)subscribes when the topic changed. That is the
-  // only subscription work at activation; the callback reads base_frame for itself.
   bool configure_source(std::string *error) {
     PositionSourceParams params;
     std::string topic;
@@ -285,9 +249,8 @@ class FRIPositionPassthroughController : public controller_interface::Controller
       target_subscription_ = get_node()->create_subscription<geometry_msgs::msg::PoseStamped>(
           topic, rclcpp::QoS(1),
           [this, topic](const geometry_msgs::msg::PoseStamped::SharedPtr message) {
-            // crisp's cartesian_impedance_controller ignores the topic while it has more than one
-            // publisher and holds its last target. So does this: no new target, and the output
-            // goes stale (the measured position) instead of chasing a pose crisp is not.
+            // crisp's CartesianController ignores the topic while it has more than one publisher
+            // and holds its last target. A target taken here would be a pose crisp is not at.
             const std::size_t publishers = get_node()->count_publishers(topic);
             if (publishers > 1) {
               RCLCPP_WARN_THROTTLE(
@@ -322,26 +285,22 @@ class FRIPositionPassthroughController : public controller_interface::Controller
     return true;
   }
 
+  // False when a joint has no finite position state; q_meas_ keeps that joint's last one.
   bool read_measured_positions() {
-    if (command_interfaces_.size() != joints_.size() || state_interfaces_.size() != joints_.size()) {
-      RCLCPP_ERROR_THROTTLE(
-          get_node()->get_logger(), *get_node()->get_clock(), 1000,
-          "Expected %zu position command and state interfaces, got %zu and %zu.",
-          joints_.size(), command_interfaces_.size(), state_interfaces_.size());
-      return false;
-    }
-
+    bool all_finite = true;
     for (std::size_t index = 0; index < joints_.size(); ++index) {
       const auto measured_position = state_interfaces_[index].get_optional();
       if (!measured_position.has_value() || !std::isfinite(measured_position.value())) {
         RCLCPP_ERROR_THROTTLE(
             get_node()->get_logger(), *get_node()->get_clock(), 1000,
-            "No finite position state for joint '%s'.", joints_[index].c_str());
-        return false;
+            "No finite position state for joint '%s': its last one is kept.",
+            joints_[index].c_str());
+        all_finite = false;
+        continue;
       }
       q_meas_[static_cast<Eigen::Index>(index)] = measured_position.value();
     }
-    return true;
+    return all_finite;
   }
 
   bool write_commands() {
@@ -388,7 +347,6 @@ class FRIPositionPassthroughController : public controller_interface::Controller
     }
   }
 
-  // [mode, stale, q_meas[n], q_ik[n], q_out[n], gap_clamped[n], step_clamped[n]].
   void publish_state() {
     if (!state_publisher_ || !state_publisher_->trylock()) {
       return;
@@ -475,13 +433,6 @@ class ZeroEffortController : public controller_interface::ControllerInterface {
 
  private:
   bool write_zero_effort() {
-    if (command_interfaces_.size() != joints_.size()) {
-      RCLCPP_ERROR_THROTTLE(
-          get_node()->get_logger(), *get_node()->get_clock(), 1000,
-          "Expected %zu effort command interfaces, got %zu.", joints_.size(),
-          command_interfaces_.size());
-      return false;
-    }
     for (std::size_t index = 0; index < joints_.size(); ++index) {
       if (!command_interfaces_[index].set_value(0.0)) {
         RCLCPP_ERROR_THROTTLE(
