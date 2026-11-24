@@ -50,13 +50,11 @@ void urdf_limits(Eigen::VectorXd *lower, Eigen::VectorXd *upper) {
   }
 }
 
-// The gap the expectations below are written for: 0.05 rad on A1 to A3, down to 0.015 on A7.
-PositionSourceParams ik_params() {
-  PositionSourceParams params;
-  params.sunrise_joint_stiffness.assign(7, 200.0);
-  params.max_spring_torque_nm = {10.0, 10.0, 10.0, 8.0, 5.0, 5.0, 3.0};
-  return params;
-}
+// PositionSourceParams() is what the stack ships. Its gap, max_spring_torque_nm over
+// sunrise_joint_stiffness: 5/1000, 5/1000, 5/1000, 4/500, 2.5/500, 2.5/500, 1.5/500 rad. The step
+// is 0.004 rad on every joint: A7's gap is below it, A4's is two of it.
+const double kGap[7] = {0.005, 0.005, 0.005, 0.008, 0.005, 0.005, 0.003};
+constexpr double kStep = 0.004;
 
 PositionSourceParams unclamped(PositionSourceParams params) {
   params.max_spring_torque_nm.assign(7, 1e6);
@@ -103,35 +101,35 @@ bool bit_identical(const Eigen::VectorXd &a, const Eigen::VectorXd &b) {
 TEST(PositionSourceParams, InvalidValuesFailConfigure) {
   PositionSource source;
   std::string error;
-  ASSERT_TRUE(source.configure(7, ik_params(), &error)) << error;
+  ASSERT_TRUE(source.configure(7, PositionSourceParams(), &error)) << error;
 
   auto expect_rejected = [&](PositionSourceParams params, const char *what) {
     std::string reason;
     EXPECT_FALSE(source.configure(7, params, &reason)) << what;
     EXPECT_FALSE(reason.empty()) << what;
   };
-  auto params = ik_params();
+  PositionSourceParams params;
   params.max_joint_step_rad.assign(6, 0.004);
   expect_rejected(params, "6 steps for 7 joints");
-  params = ik_params();
+  params = PositionSourceParams();
   params.sunrise_joint_stiffness[2] = 0.0;
   expect_rejected(params, "zero stiffness");
-  params = ik_params();
+  params = PositionSourceParams();
   params.max_spring_torque_nm[0] = -1.0;
   expect_rejected(params, "negative torque");
-  params = ik_params();
+  params = PositionSourceParams();
   params.max_joint_step_rad[3] = std::numeric_limits<double>::quiet_NaN();
   expect_rejected(params, "NaN step");
-  params = ik_params();
+  params = PositionSourceParams();
   params.target_filter = 1.0;
   expect_rejected(params, "filter 1");
-  params = ik_params();
+  params = PositionSourceParams();
   params.target_timeout_s = 0.0;
   expect_rejected(params, "timeout 0");
 
   // A margin is checked against the limits, so only once a model is loaded.
   ASSERT_TRUE(source.load_model(urdf(), kJoints, &error)) << error;
-  params = ik_params();
+  params = PositionSourceParams();
   params.joint_limit_margin_rad = 2.5;
   expect_rejected(params, "margin wider than A2's range");
 }
@@ -149,7 +147,7 @@ TEST(PositionSourceIk, ConvergesToReachableTargets) {
   std::mt19937 random(3);
   std::uniform_real_distribution<double> offset(-0.4, 0.4);
   for (const double nullspace : {0.0, 0.05}) {
-    auto params = unclamped(ik_params());
+    auto params = unclamped(PositionSourceParams());
     params.target_filter = 0.0;
     params.nullspace_gain = nullspace;
     PositionSource source = make_source(params);
@@ -175,7 +173,7 @@ TEST(PositionSourceIk, ConvergesToReachableTargets) {
 }
 
 TEST(PositionSourceIk, ConvergesThroughTheTargetFilter) {
-  PositionSource source = make_source(unclamped(ik_params()));
+  PositionSource source = make_source(unclamped(PositionSourceParams()));
   const Eigen::VectorXd q_meas = nominal();
   source.activate(q_meas);
   PoseTarget target = fk(source, nominal());
@@ -196,10 +194,12 @@ TEST(PositionSourceIk, ConvergesThroughTheTargetFilter) {
 }
 
 TEST(PositionSourceIk, GapClampHoldsForAFarTarget) {
-  const auto params = ik_params();
+  const PositionSourceParams params;
   const Eigen::VectorXd gap = gap_of(params);
-  EXPECT_NEAR(gap[0], 0.05, 1e-15);
-  EXPECT_NEAR(gap[6], 0.015, 1e-15);
+  for (int index = 0; index < 7; ++index) {
+    EXPECT_NEAR(gap[index], kGap[index], 1e-15) << "joint " << index;
+    EXPECT_EQ(params.max_joint_step_rad[index], kStep) << "joint " << index;
+  }
   PositionSource source = make_source(params);
   const Eigen::VectorXd q_meas = nominal();
   source.activate(q_meas);
@@ -220,7 +220,7 @@ TEST(PositionSourceIk, GapClampHoldsForAFarTarget) {
 }
 
 TEST(PositionSourceIk, GapClampHoldsAcrossATargetJumpWhileTheArmTracks) {
-  const auto params = ik_params();
+  const PositionSourceParams params;
   const Eigen::VectorXd gap = gap_of(params);
   PositionSource source = make_source(params);
   Eigen::VectorXd q_meas = nominal();
@@ -243,7 +243,7 @@ TEST(PositionSourceIk, GapClampHoldsAcrossATargetJumpWhileTheArmTracks) {
 }
 
 TEST(PositionSourceIk, OutputStepIsClampedPerJoint) {
-  auto params = ik_params();
+  PositionSourceParams params;
   params.max_spring_torque_nm.assign(7, 1e6);  // only the step clamp acts
   params.max_joint_step_rad = {0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007};
   PositionSource source = make_source(params);
@@ -280,7 +280,7 @@ TEST(PositionSourceClamps, GapHoldsWhileTheArmOutrunsTheStepLimit) {
       {"streaming A7 2.35 rad/s", true, 6, 2.35},
   };
   for (const Case &c : cases) {
-    const auto params = ik_params();
+    const PositionSourceParams params;
     const Eigen::VectorXd gap = gap_of(params);
     PositionSource source = make_source(params);
     Eigen::VectorXd q_meas = nominal();
@@ -307,12 +307,57 @@ TEST(PositionSourceClamps, GapHoldsWhileTheArmOutrunsTheStepLimit) {
   }
 }
 
+// The arm behind the IK, held or moving slower than it: the output leads it by the gap, update
+// after update. A1's gap is above the step and A4's is two steps, so on the way out their step
+// binds first; A7's gap is below the step, so it binds at once and A7's step never does.
+TEST(PositionSourceClamps, GapBindsWhileTheArmLags) {
+  const int ahead[] = {0, 3, 6};
+  for (const double arm_step : {0.0, 0.0005}) {  // rad per update: held, and 0.25 rad/s
+    PositionSource source = make_source(PositionSourceParams());
+    Eigen::VectorXd q_meas = nominal();
+    source.activate(q_meas);
+    Eigen::VectorXd goal = nominal();
+    for (const int joint : ahead) goal[joint] += 0.4;
+    const PoseTarget target = fk(source, goal);
+    for (int update = 1; update <= 400; ++update) {
+      for (const int joint : ahead) q_meas[joint] += arm_step;
+      source.update(q_meas, kDt, &target);
+      const Eigen::VectorXd lead = source.q_out() - q_meas;
+      for (int index = 0; index < 7; ++index) {
+        ASSERT_LE(std::abs(lead[index]), kGap[index] + 1e-12)
+            << "arm step " << arm_step << " joint " << index << " update " << update;
+      }
+      for (const int joint : ahead) {
+        ASSERT_GT(source.q_ik()[joint] - q_meas[joint], kGap[joint])
+            << "the IK is not ahead: arm step " << arm_step << " joint " << joint << " update "
+            << update;
+        ASSERT_EQ(source.gap_clamped()[joint], 1.0) << "joint " << joint << " update " << update;
+        if (update >= 4) {
+          ASSERT_NEAR(lead[joint], kGap[joint], 1e-12)
+              << "arm step " << arm_step << " joint " << joint << " update " << update;
+          ASSERT_EQ(source.step_clamped()[joint], 0.0)
+              << "arm step " << arm_step << " joint " << joint << " update " << update;
+        }
+      }
+      ASSERT_EQ(source.step_clamped()[6], 0.0) << "update " << update;
+      if (update == 1) {
+        // One step from where the output was at activation, while the arm moved arm_step.
+        EXPECT_NEAR(lead[0], kStep - arm_step, 1e-12);
+        EXPECT_NEAR(lead[3], kStep - arm_step, 1e-12);
+        EXPECT_EQ(source.step_clamped()[0], 1.0);
+        EXPECT_EQ(source.step_clamped()[3], 1.0);
+        EXPECT_NEAR(lead[6], kGap[6], 1e-12);
+      }
+    }
+  }
+}
+
 TEST(PositionSourceIk, JointLimitMarginHolds) {
   Eigen::VectorXd lower;
   Eigen::VectorXd upper;
   urdf_limits(&lower, &upper);
   for (const double margin : {0.05, 0.2}) {
-    auto params = ik_params();
+    PositionSourceParams params;
     params.joint_limit_margin_rad = margin;
     PositionSource source = make_source(params);
     std::mt19937 random(11);
@@ -341,7 +386,7 @@ TEST(PositionSourceIk, JointLimitMarginHolds) {
 }
 
 TEST(PositionSourceIk, StaleTargetFallsBackAndRecoversLikeAFreshActivation) {
-  const auto params = ik_params();
+  const PositionSourceParams params;
   PositionSource source = make_source(params);
   const Eigen::VectorXd q_meas = nominal();
   source.activate(q_meas);
@@ -352,7 +397,8 @@ TEST(PositionSourceIk, StaleTargetFallsBackAndRecoversLikeAFreshActivation) {
     source.update(q_meas, kDt, &target);
     ASSERT_FALSE(source.stale());
   }
-  ASSERT_GT((source.q_out() - q_meas).cwiseAbs().maxCoeff(), 0.01);
+  Eigen::VectorXd lead = (source.q_out() - q_meas).cwiseAbs();
+  ASSERT_NEAR(lead[3], kGap[3], 1e-12);  // A4 is on its gap, two steps out
 
   int stale_at = -1;
   int timed_out_events = 0;
@@ -362,7 +408,19 @@ TEST(PositionSourceIk, StaleTargetFallsBackAndRecoversLikeAFreshActivation) {
     if (source.events() & PositionSource::kTargetTimedOut) ++timed_out_events;
     if (stale_at < 0 && source.stale()) stale_at = update;
     for (int index = 0; index < 7; ++index) {
-      ASSERT_LE(std::abs(source.q_out()[index] - previous[index]), 0.004 + 1e-15);
+      const double now = std::abs(source.q_out()[index] - q_meas[index]);
+      ASSERT_LE(std::abs(source.q_out()[index] - previous[index]), kStep + 1e-15);
+      if (source.stale()) {
+        // Back to the held arm, one step per update.
+        ASSERT_NEAR(now, std::max(0.0, lead[index] - (update - stale_at + 1) * kStep), 1e-12)
+            << "joint " << index << " update " << update;
+      } else {
+        // The target is still in use: the output leads by what the IK leads, up to the gap.
+        ASSERT_NEAR(now, std::min(kGap[index], std::abs(source.q_ik()[index] - q_meas[index])),
+                    1e-12)
+            << "joint " << index << " update " << update;
+        lead[index] = now;
+      }
     }
     previous = source.q_out();
   }
@@ -386,7 +444,7 @@ TEST(PositionSourceIk, StaleTargetFallsBackAndRecoversLikeAFreshActivation) {
 }
 
 TEST(PositionSourceIk, NonFiniteInputsFallBack) {
-  PositionSource source = make_source(ik_params());
+  PositionSource source = make_source(PositionSourceParams());
   const Eigen::VectorXd q_meas = nominal();
   source.activate(q_meas);
   const double nan = std::numeric_limits<double>::quiet_NaN();
@@ -403,7 +461,7 @@ TEST(PositionSourceIk, NonFiniteInputsFallBack) {
   good.position.z() += 0.05;
   for (int update = 0; update < 20; ++update) source.update(q_meas, kDt, &good);
   const Eigen::VectorXd q_ik_before = source.q_ik();
-  PositionSource reference = make_source(ik_params());
+  PositionSource reference = make_source(PositionSourceParams());
   reference.activate(q_meas);
   for (int update = 0; update < 20; ++update) reference.update(q_meas, kDt, &good);
   for (const auto &orientation :
@@ -419,21 +477,28 @@ TEST(PositionSourceIk, NonFiniteInputsFallBack) {
   }
   EXPECT_FALSE(bit_identical(source.q_ik(), q_ik_before));
 
-  const Eigen::VectorXd out_before = source.q_out();
+  // A4 is on its gap, two steps from the measured position: back one step per update.
+  ASSERT_NEAR(std::abs(source.q_out()[3] - q_meas[3]), kGap[3], 1e-12);
+  int steps_back = 0;
+  Eigen::VectorXd previous = source.q_out();
   for (const double dt : {nan, inf, 0.0, -kDt}) {
     source.update(q_meas, dt, &good);
     EXPECT_TRUE(source.events() & PositionSource::kInvalidPeriod);
     EXPECT_TRUE(source.stale());
     EXPECT_TRUE(source.q_out().allFinite());
+    EXPECT_LE((source.q_out() - previous).cwiseAbs().maxCoeff(), kStep + 1e-15);
+    EXPECT_NEAR(std::abs(source.q_out()[3] - q_meas[3]),
+                std::max(0.0, kGap[3] - ++steps_back * kStep), 1e-12);
+    previous = source.q_out();
   }
-  EXPECT_LE((source.q_out() - out_before).cwiseAbs().maxCoeff(), 4 * 0.004 + 1e-15);
+  EXPECT_TRUE(bit_identical(source.q_out(), q_meas));
   source.update(q_meas, kDt, &good);
   EXPECT_FALSE(source.stale());
   EXPECT_EQ(source.events(), 0u);
 }
 
 TEST(PositionSourceIk, ActivationResetsEverything) {
-  PositionSource source = make_source(ik_params());
+  PositionSource source = make_source(PositionSourceParams());
   source.activate(nominal());
   PoseTarget target = fk(source, nominal());
   target.position.x() += 0.1;
@@ -451,7 +516,7 @@ TEST(PositionSourceIk, ActivationResetsEverything) {
   EXPECT_TRUE(bit_identical(source.q_out(), q2));
   EXPECT_TRUE(source.stale());
 
-  PositionSource fresh = make_source(ik_params());
+  PositionSource fresh = make_source(PositionSourceParams());
   fresh.activate(q2);
   fresh.update(q2, kDt, nullptr);
   for (int update = 0; update < 50; ++update) {
@@ -462,7 +527,7 @@ TEST(PositionSourceIk, ActivationResetsEverything) {
 }
 
 TEST(PositionSourceIk, MissingFrameOrModelFallsBackToMeasured) {
-  auto params = ik_params();
+  PositionSourceParams params;
   params.end_effector_frame = "lbr_no_such_frame";
   PositionSource source;
   std::string error;
@@ -483,7 +548,7 @@ TEST(PositionSourceIk, MissingFrameOrModelFallsBackToMeasured) {
   }
 
   PositionSource no_model;
-  ASSERT_TRUE(no_model.configure(7, ik_params(), &error)) << error;
+  ASSERT_TRUE(no_model.configure(7, PositionSourceParams(), &error)) << error;
   EXPECT_FALSE(no_model.kinematics_ready());
   no_model.activate(nominal());
   no_model.update(nominal(), kDt, &target);
@@ -502,7 +567,7 @@ TEST(PositionSourceIk, BaseFrameOffsetFromTheWorldFallsBack) {
   PositionSource source;
   std::string error;
   ASSERT_TRUE(source.load_model(mounted, kJoints, &error)) << error;
-  ASSERT_TRUE(source.configure(7, ik_params(), &error)) << error;
+  ASSERT_TRUE(source.configure(7, PositionSourceParams(), &error)) << error;
   EXPECT_FALSE(source.kinematics_ready());
   EXPECT_NE(source.kinematics_error().find("not the model's world"), std::string::npos)
       << source.kinematics_error();
@@ -526,7 +591,7 @@ TEST(PositionSourceRealtime, NoMallocCheckIsArmed) {
 }
 
 TEST(PositionSourceRealtime, UpdateDoesNotAllocate) {
-  PositionSource source = make_source(ik_params());
+  PositionSource source = make_source(PositionSourceParams());
   const Eigen::VectorXd q_meas = nominal();
   PoseTarget target = fk(source, nominal());
   target.position.x() += 0.2;
