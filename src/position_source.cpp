@@ -41,31 +41,6 @@ bool per_joint(const std::vector<double> &values, std::size_t joint_count, const
 
 }  // namespace
 
-bool parse_position_source_mode(const std::string &text, PositionSourceMode *mode) {
-  if (text == "measured") {
-    *mode = PositionSourceMode::kMeasured;
-  } else if (text == "lagged") {
-    *mode = PositionSourceMode::kLagged;
-  } else if (text == "ik_target") {
-    *mode = PositionSourceMode::kIkTarget;
-  } else {
-    return false;
-  }
-  return true;
-}
-
-const char *to_string(PositionSourceMode mode) {
-  switch (mode) {
-    case PositionSourceMode::kMeasured:
-      return "measured";
-    case PositionSourceMode::kLagged:
-      return "lagged";
-    case PositionSourceMode::kIkTarget:
-      return "ik_target";
-  }
-  return "unknown";
-}
-
 bool PositionSource::load_model(const std::string &urdf_xml,
                                 const std::vector<std::string> &joints, std::string *error) {
   model_loaded_ = false;
@@ -131,10 +106,6 @@ bool PositionSource::configure(std::size_t joint_count, const PositionSourcePara
     *error = "no joints.";
     return false;
   }
-  if (!finite_and_at_least(params.lag_time_constant_s, 0.0)) {
-    *error = "lag_time_constant_s must be finite and >= 0.";
-    return false;
-  }
   if (!std::isfinite(params.target_filter) || params.target_filter < 0.0 ||
       params.target_filter >= 1.0) {
     *error = "target_filter must be in [0, 1).";
@@ -158,23 +129,17 @@ bool PositionSource::configure(std::size_t joint_count, const PositionSourcePara
   }
 
   const auto n = static_cast<Eigen::Index>(joint_count);
-  if (params.mode == PositionSourceMode::kMeasured) {
-    // measured never clamps, so a config sized for another arm still passes.
-    max_step_.setZero(n);
-    gap_.setZero(n);
-  } else {
-    Eigen::VectorXd stiffness;
-    Eigen::VectorXd torque;
-    if (!per_joint(params.max_joint_step_rad, joint_count, "max_joint_step_rad", 0.0, true,
-                   &max_step_, error) ||
-        !per_joint(params.sunrise_joint_stiffness, joint_count, "sunrise_joint_stiffness", 0.0,
-                   true, &stiffness, error) ||
-        !per_joint(params.max_spring_torque_nm, joint_count, "max_spring_torque_nm", 0.0, false,
-                   &torque, error)) {
-      return false;
-    }
-    gap_ = torque.cwiseQuotient(stiffness);
+  Eigen::VectorXd stiffness;
+  Eigen::VectorXd torque;
+  if (!per_joint(params.max_joint_step_rad, joint_count, "max_joint_step_rad", 0.0, true,
+                 &max_step_, error) ||
+      !per_joint(params.sunrise_joint_stiffness, joint_count, "sunrise_joint_stiffness", 0.0,
+                 true, &stiffness, error) ||
+      !per_joint(params.max_spring_torque_nm, joint_count, "max_spring_torque_nm", 0.0, false,
+                 &torque, error)) {
+    return false;
   }
+  gap_ = torque.cwiseQuotient(stiffness);
 
   params_ = params;
   joint_count_ = joint_count;
@@ -183,7 +148,6 @@ bool PositionSource::configure(std::size_t joint_count, const PositionSourcePara
   q_posture_.setZero(n);
   gap_clamped_.setZero(n);
   step_clamped_.setZero(n);
-  proposal_.setZero(n);
 
   kinematics_ready_ = false;
   kinematics_error_.clear();
@@ -214,11 +178,10 @@ bool PositionSource::configure(std::size_t joint_count, const PositionSourcePara
       }
     }
     if (!kinematics_error_.empty()) {
-      if (params.mode == PositionSourceMode::kIkTarget) {
-        *error = kinematics_error_ + ".";
-        return false;
-      }
-    } else if (!world_from_base_.isIdentity(1e-9)) {
+      *error = kinematics_error_ + ".";
+      return false;
+    }
+    if (!world_from_base_.isIdentity(1e-9)) {
       // crisp has no base_frame: it compares the raw target with the end effector's pose in the
       // model's world. Reading the target in an offset base_frame would chase another pose.
       const Eigen::Vector3d &offset = world_from_base_.translation();
@@ -245,7 +208,7 @@ void PositionSource::activate(const Eigen::VectorXd &q_meas) {
   gap_clamped_.setZero();
   step_clamped_.setZero();
   have_target_ = false;
-  stale_ = params_.mode == PositionSourceMode::kIkTarget;
+  stale_ = true;
   since_target_s_ = 0.0;
   events_ = 0;
   filtered_position_.setZero();
@@ -258,29 +221,10 @@ void PositionSource::update(const Eigen::VectorXd &q_meas, double dt,
   gap_clamped_.setZero();
   step_clamped_.setZero();
 
-  if (params_.mode == PositionSourceMode::kMeasured) {
-    q_out_ = q_meas;
-    q_ik_ = q_meas;
-    stale_ = false;
-    return;
-  }
-
-  const bool ik = params_.mode == PositionSourceMode::kIkTarget;
   if (!std::isfinite(dt) || dt <= 0.0) {
     events_ |= kInvalidPeriod;
     have_target_ = false;
     fall_back_to_measured(q_meas);
-    return;
-  }
-
-  if (!ik) {
-    // a = 1 - exp(-dt/tau): the exact discretisation of a first-order lag at any dt.
-    const double tau = params_.lag_time_constant_s;
-    const double alpha = tau > 0.0 ? -std::expm1(-dt / tau) : 1.0;
-    proposal_ = q_out_ + alpha * (q_meas - q_out_);
-    q_ik_ = proposal_;
-    stale_ = false;
-    clamp_and_step(q_meas, proposal_);
     return;
   }
 
@@ -338,7 +282,8 @@ void PositionSource::update(const Eigen::VectorXd &q_meas, double dt,
 }
 
 bool PositionSource::ik_step() {
-  // Integrated on q_ik, never on the measured position: that would reproduce `measured`.
+  // Integrated on q_ik, never on the measured position: from there every step would start on
+  // the arm and the output would not lead it.
   for (std::size_t index = 0; index < joint_count_; ++index) {
     q_pin_[idx_q_[index]] = q_ik_[static_cast<Eigen::Index>(index)];
   }
@@ -385,7 +330,7 @@ bool PositionSource::ik_step() {
 }
 
 void PositionSource::fall_back_to_measured(const Eigen::VectorXd &q_meas) {
-  stale_ = params_.mode == PositionSourceMode::kIkTarget;
+  stale_ = true;
   q_ik_ = q_meas;
   clamp_and_step(q_meas, q_meas);
 }

@@ -1,36 +1,27 @@
-"""Bench check of the passthrough's position_source modes on the mock stack.
+"""Bench check of the passthrough on the mock stack.
 
-It drives the plugin as the controller manager runs it: the parameters set at REST with
-scripts/position_source.py, the mode taking effect at the next arm, the /lbr/target_pose
-subscription, the stale fallback and ~/state.
+It drives the plugin as the controller manager runs it: arming and resting, the /lbr/target_pose
+subscription, the IK against one computed here, both clamps, the stale fallback, two publishers
+and ~/state.
 
     ROS_DOMAIN_ID=77 pixi run -e jazzy mock-loopback     # terminal 1
     pixi run -e jazzy check-mock                         # terminal 2
 
-    pixi run -e jazzy mock-offset                        # terminal 1, in place of mock-loopback
-    pixi run -e jazzy check-mock --offset-lagged         # terminal 2
-
 mock_components/GenericSystem copies each position command into the position state at the next
 read, so q_meas(k) = q_out(k-1):
 
-* under ik_target the arm follows the passthrough's output, and FK of /lbr/joint_states is where
-  the IK went;
+* the arm follows the passthrough's output, and FK of /lbr/joint_states is where the IK went;
 * |q_out - q_meas| is one update's step: gap_clamped fires, but the gap cannot bind for longer
-  than an update;
-* lagged has nothing to lag. The offset mock makes q_meas(k) = q_out(k-1) + d, and the response
-  to that step of d every update gives a = 1 - exp(-dt / tau).
+  than an update.
 
 Refuses to run unless ROS_DOMAIN_ID is 77, the RMW is CycloneDDS on this repository's loopback
-file, and the robot_description is mock_components/GenericSystem. Leaves the stack at REST with
-position_source measured. Exits 0 when every check passed.
+file, and the robot_description is mock_components/GenericSystem. Leaves the stack at REST. Exits
+0 when every check passed.
 """
 
-import argparse
 import itertools
 import math
 import os
-import re
-import subprocess
 import sys
 import threading
 import time
@@ -51,15 +42,17 @@ from lbr_cell import (
     PASSTHROUGH,
     REST,
     TRAJECTORY,
+    call,
     cell_state,
     controller_states,
     spinning,
     switch,
 )
-from position_source import PARAMETERS, get_parameters, spring_gap
 from rcl_interfaces.msg import Log
+from rcl_interfaces.srv import GetParameters
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.parameter import parameter_value_to_python
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from scipy.spatial.transform import Rotation
 from sensor_msgs.msg import JointState
@@ -68,8 +61,19 @@ from trajectory_msgs.msg import JointTrajectoryPoint
 
 REPO = Path(__file__).resolve().parents[1]
 LOOPBACK = REPO / "config" / "cyclonedds_loopback.xml"
-TOOL = REPO / "scripts" / "position_source.py"
 N = len(JOINTS)
+# ~/state[0] under position_source ik_target.
+IK_TARGET = 2
+PARAMETERS = (
+    "end_effector_frame",
+    "target_timeout_s",
+    "ik_damping",
+    "nullspace_gain",
+    "joint_limit_margin_rad",
+    "max_joint_step_rad",
+    "sunrise_joint_stiffness",
+    "max_spring_torque_nm",
+)
 TARGET_RATE_HZ = 100.0
 DT = 0.002  # controller_manager's update_rate is 500 (config/controllers.yaml)
 REACH_MM = 3.0
@@ -187,6 +191,19 @@ class Mock(Node):
     def cell(self) -> str:
         return cell_state(controller_states(self))
 
+    def parameters(self) -> dict:
+        """The passthrough's PARAMETERS."""
+        answer = call(
+            self,
+            GetParameters,
+            f"{NS}/{PASSTHROUGH}/get_parameters",
+            GetParameters.Request(names=list(PARAMETERS)),
+        )
+        # rclcpp answers with no value at all when one of the names is not declared.
+        if len(answer.values) != len(PARAMETERS):
+            raise RuntimeError(f"{PASSTHROUGH} does not declare {', '.join(PARAMETERS)}")
+        return dict(zip(PARAMETERS, map(parameter_value_to_python, answer.values)))
+
     def try_switch(self, *, activate: tuple[str, ...], deactivate: tuple[str, ...]) -> str:
         """One STRICT switch. Empty, or why the controller manager refused it."""
         try:
@@ -284,7 +301,7 @@ class Kinematics:
     def ik_step(
         self, q: np.ndarray, target: pin.SE3, posture: np.ndarray, values: dict
     ) -> np.ndarray:
-        """One update of the ik_target law (docs/position_source.md) from q, target unfiltered."""
+        """One update of the IK law (docs/position_source.md) from q, target unfiltered."""
         e, J = self._error_jacobian(q, target)
         lam = values["ik_damping"]
         pinv = J.T @ np.linalg.inv(J @ J.T + lam * lam * np.eye(6))
@@ -318,19 +335,17 @@ def offset(pose: pin.SE3, dp=(0.0, 0.0, 0.0), rotvec_deg=(0.0, 0.0, 0.0)) -> pin
     return pin.SE3(R @ pose.rotation, pose.translation + np.asarray(dp))
 
 
-def consecutive(states: list[State], d: float = 0.0) -> list[tuple[State, State]]:
-    """Pairs of ~/state messages from successive updates: on the mock q_meas(k) = q_out(k-1) + d.
+def consecutive(states: list[State]) -> list[tuple[State, State]]:
+    """Pairs of ~/state messages from successive updates: on the mock q_meas(k) = q_out(k-1).
 
     The realtime publisher skips a message when it cannot take its lock, which breaks the
-    identity: a per-update check uses only the pairs that hold it.
+    identity: a per-update check uses only the pairs that hold it and in which the output moved.
     """
-    pairs = []
-    for a, b in itertools.pairwise(states):
-        if np.all(np.abs(b.q_meas - (a.q_out + d)) <= 1e-12 + 1e-9 * abs(d)):
-            moved = np.any(b.q_out != a.q_out)
-            if d != 0.0 or moved:
-                pairs.append((a, b))
-    return pairs
+    return [
+        (a, b)
+        for a, b in itertools.pairwise(states)
+        if np.all(np.abs(b.q_meas - a.q_out) <= 1e-12) and np.any(b.q_out != a.q_out)
+    ]
 
 
 def fmt(values) -> str:
@@ -345,22 +360,12 @@ def stationary(joints: list[tuple[float, np.ndarray]]) -> float:
     return float(np.max(np.abs(q - q[0])))
 
 
-def run_tool(*args: str) -> tuple[int, str]:
-    out = subprocess.run(
-        [sys.executable, str(TOOL), *args], capture_output=True, text=True, timeout=60, check=False
-    )
-    text = (out.stdout + out.stderr).strip()
-    # CycloneDDS warns about multicast on the loopback interface in every process.
-    lines = [line for line in text.splitlines() if "multicast" not in line]
-    return out.returncode, "\n".join(lines)
-
-
 class Gate:
     def __init__(self, node: Mock, results: Results) -> None:
         self.node = node
         self.r = results
 
-    def setup(self, home: bool = True) -> bool:
+    def setup(self) -> bool:
         deadline = time.monotonic() + 10.0
         while (self.node.urdf is None or not self.node.joints) and time.monotonic() < deadline:
             time.sleep(0.05)
@@ -373,42 +378,34 @@ class Gate:
         if self.node.cell() != "REST":
             print(f"REFUSED: not at REST ({self.node.cell()})")
             return False
-        self.values = get_parameters(self.node, PASSTHROUGH, PARAMETERS)
-        self.gap = np.array(spring_gap(self.values))
+        self.values = self.node.parameters()
+        self.gap = np.array(self.values["max_spring_torque_nm"]) / np.array(
+            self.values["sunrise_joint_stiffness"]
+        )
         self.max_step = np.array(self.values["max_joint_step_rad"])
         self.kin = Kinematics(self.node.urdf, self.values["end_effector_frame"])
         self.posture = self.node.q()
         print(f"gap {fmt(self.gap)} rad, step {fmt(self.max_step)} rad per update")
-        if home:
-            ok = self.node.move_joints(np.radians(HOME_DEGREES), 4.0)
-            time.sleep(0.3)
-            self.r.check(
-                "setup: home through joint_trajectory_controller at REST",
-                ok and np.allclose(self.node.q(), np.radians(HOME_DEGREES), atol=1e-3),
-                f"q = {fmt(np.degrees(self.node.q()))} deg",
-            )
+        ok = self.node.move_joints(np.radians(HOME_DEGREES), 4.0)
+        time.sleep(0.3)
+        self.r.check(
+            "setup: home through joint_trajectory_controller at REST",
+            ok and np.allclose(self.node.q(), np.radians(HOME_DEGREES), atol=1e-3),
+            f"q = {fmt(np.degrees(self.node.q()))} deg",
+        )
         return True
 
-    def set_mode(self, mode: str, *params: str) -> bool:
-        args = ["set", mode, *[f"--param={p}" for p in params]]
-        code, text = run_tool(*args)
-        return self.r.check(
-            f"{mode}: position_source.py {' '.join(args[1:])} at REST",
-            code == 0 and "read back: identical" in text,
-            f"exit {code}; {text.splitlines()[-1] if text else ''}",
-        )
-
-    def arm(self, mode: str) -> bool:
+    def arm(self, label: str) -> bool:
         before = self.node.cell()
         refused = self.node.try_switch(activate=ARMED, deactivate=REST)
         after = self.node.cell()
         return self.r.check(
-            f"{mode}: REST -> ARMED (STRICT switch)",
+            f"{label}: REST -> ARMED (STRICT switch)",
             not refused and after.startswith("ARMED"),
             f"{before} -> {after}{'; ' + refused if refused else ''}",
         )
 
-    def rest(self, mode: str) -> bool:
+    def rest(self, label: str) -> bool:
         mark = self.node.mark()
         refused = self.node.try_switch(activate=REST, deactivate=ARMED)
         time.sleep(0.2)
@@ -417,7 +414,7 @@ class Gate:
         # trajectory controller to hold, and logs an error when it could not.
         failed = [m for _, m in logs if "Deactivating without" in m or "Failed to leave" in m]
         return self.r.check(
-            f"{mode}: ARMED -> REST, the measured position left in the command",
+            f"{label}: ARMED -> REST, the measured position left in the command",
             not refused and self.node.cell() == "REST" and not failed,
             f"{self.node.cell()}; "
             + (f"on_deactivate: {failed[0]}" if failed else "no on_deactivate error")
@@ -430,119 +427,6 @@ class Gate:
             any(text in m for _, m in logs),
             next((m for _, m in logs if "position_source" in m), "no log line on /rosout"),
         )
-
-    def running_mode(self, mode: str) -> None:
-        code, text = run_tool("status")
-        line = next((x for x in text.splitlines() if x.startswith("running")), "")
-        self.r.check(
-            f"{mode}: position_source.py status reads the running mode",
-            code == 0 and line.startswith(f"running (~/state): {mode}"),
-            line or text.splitlines()[-1],
-        )
-
-    def refuses_limit_changes(self) -> None:
-        # 20 for 200 would be a 0.5 rad gap.
-        names = ("position_source", "sunrise_joint_stiffness")
-        before = get_parameters(self.node, PASSTHROUGH, names)
-        code, text = run_tool("set", "ik_target", "--param=sunrise_joint_stiffness=20")
-        after = get_parameters(self.node, PASSTHROUGH, names)
-        self.r.check(
-            "tool: `set` refuses a looser spring-torque limit without --limit-change-reviewed",
-            code == 1 and "--limit-change-reviewed" in text and after == before,
-            f"exit {code}; " + next((x for x in text.splitlines() if "REFUSED" in x), text)[:120],
-        )
-
-    def per_joint_step(self) -> None:
-        steps = [0.004, 0.004, 0.004, 0.004, 0.003, 0.003, 0.002]
-        ok = self.set_mode("lagged", "max_joint_step_rad=" + ",".join(map(str, steps)))
-        live = get_parameters(self.node, PASSTHROUGH, ("max_joint_step_rad",))["max_joint_step_rad"]
-        self.r.check(
-            "tool: a per-joint max_joint_step_rad sets as a double array",
-            ok and live == steps and all(isinstance(v, float) for v in live),
-            f"live {live}",
-        )
-        self.set_mode("lagged", f"max_joint_step_rad={self.max_step[0]}")
-
-    def refuses_when_armed(self) -> None:
-        code, text = run_tool("set", "measured")
-        self.r.check(
-            "tool: `set` refuses while ARMED",
-            code == 1 and "REFUSED" in text,
-            text.splitlines()[0] if text else f"exit {code}",
-        )
-
-    def passthrough_holds(self, label: str, mode: int, seconds: float, target=None) -> None:
-        """measured and lagged on the mock: the output is the measured position, the arm stays."""
-        q_before = self.node.q()
-        mark = self.node.mark()
-        if target is not None:
-            self.node.stream(target, seconds)
-        else:
-            time.sleep(seconds)
-        states, joints, _ = self.node.since(mark)
-        n = len(states)
-        modes = {s.mode for s in states}
-        identical = all(
-            np.array_equal(s.q_out, s.q_meas) and s.q_out.tobytes() == s.q_meas.tobytes()
-            for s in states
-        )
-        flags = sum(int(s.gap.any() or s.step.any() or s.stale) for s in states)
-        rate = n / seconds
-        moved = max(stationary(joints), float(np.max(np.abs(self.node.q() - q_before))))
-        what = "while a target 5 cm away streams" if target is not None else "with no target"
-        self.r.check(
-            f"{label}: q_out bit-identical to q_meas {what}",
-            n > 0.5 * seconds / DT and modes == {mode} and identical and flags == 0,
-            f"{n} ~/state messages ({rate:.0f}/s), mode {sorted(modes)}, "
-            f"{n if identical else 'NOT all'} identical (memcmp), {flags} with a flag or stale",
-        )
-        self.r.check(
-            f"{label}: the arm stays put {what}",
-            moved == 0.0,
-            f"largest joint change {moved:.3g} rad over {seconds:.1f} s",
-        )
-
-    def holds(self, mode: str, index: int) -> None:
-        self.running_mode(mode)
-        if mode == "measured":
-            self.refuses_when_armed()
-        self.passthrough_holds(mode, index, 1.0)
-        here = self.kin.fk(self.node.q())
-        self.passthrough_holds(mode, index, 1.0, target=offset(here, (0.05, 0.0, 0.0)))
-        self.rest(mode)
-
-    def measured(self) -> None:
-        print("\n== measured")
-        self.refuses_limit_changes()
-        self.per_joint_step()
-        if not self.set_mode("measured"):
-            return
-        q_rest = self.node.q()
-        mark = self.node.mark()
-        if not self.arm("measured"):
-            return
-        time.sleep(0.2)
-        states, _, logs = self.node.since(mark)
-        first = states[0] if states else None
-        self.r.check(
-            "measured: first output after activation = the measured position at REST",
-            first is not None and np.array_equal(first.q_out, q_rest),
-            f"|q_out - q_rest| max {np.max(np.abs(first.q_out - q_rest)) if first else 'n/a'}",
-        )
-        self.logged("measured: activation logs the mode", logs, "position_source: measured.")
-        self.holds("measured", 0)
-
-    def lagged(self) -> None:
-        print("\n== lagged (stock mock: nothing to lag; the offset run measures tau)")
-        if not self.set_mode("lagged"):
-            return
-        mark = self.node.mark()
-        if not self.arm("lagged"):
-            return
-        time.sleep(0.2)
-        _, _, logs = self.node.since(mark)
-        self.logged("lagged: activation logs the mode", logs, "position_source: lagged")
-        self.holds("lagged", 1)
 
     def _bounds(self, label: str, states: list[State]) -> None:
         gap = max((np.max(np.abs(s.q_out - s.q_meas) - self.gap) for s in states), default=-1)
@@ -588,14 +472,12 @@ class Gate:
         )
         self._bounds(label, states)
 
-    def ik_target(self) -> None:
-        print("\n== ik_target")
-        if not self.set_mode("ik_target"):
-            return
+    def run(self) -> None:
         here0 = self.kin.fk(self.node.q())
         self.node.stream(offset(here0, (0.0, 0.0, 0.05)), 0.3)
         time.sleep(0.2)
-        self.ik_arm_ignores_old_target("ik_target (first arm)")
+        armed = self.node.mark()
+        self.arm_ignores_old_target("first arm")
 
         p0 = self.kin.fk(self.node.q())
         targets = [
@@ -605,28 +487,34 @@ class Gate:
             ("back to the start pose", p0),
         ]
         for name, pose in targets:
-            self.reach(f"ik_target {name}", pose, 2.0)
+            self.reach(name, pose, 2.0)
 
         self.far(p0)
         self.stale_and_resume(p0)
         self.two_publishers(p0)
-        self.running_mode("ik_target")
+        states, _, _ = self.node.since(armed)
+        modes = sorted({s.mode for s in states})
+        self.r.check(
+            "~/state: the first value is that of ik_target in every message",
+            modes == [IK_TARGET],
+            f"{len(states)} messages while ARMED, first value {modes}",
+        )
 
-        if not self.rest("ik_target"):
+        if not self.rest("first arm"):
             return
         here = self.kin.fk(self.node.q())
         self.node.stream(offset(here, (0.0, 0.05, 0.0)), 0.5)
         time.sleep(0.2)
-        self.ik_arm_ignores_old_target("ik_target (re-arm)")
+        self.arm_ignores_old_target("re-arm")
         here = self.kin.fk(self.node.q())
         target = offset(here, (0.0, 0.0, 0.01))
         mark = self.node.mark()
         t0 = time.monotonic()
-        self.reach("ik_target (re-arm) +10 mm z", target, 1.5)
-        self.restart_check("ik_target (re-arm)", self.node.since(mark)[0], t0, target)
-        self.rest("ik_target")
+        self.reach("re-arm +10 mm z", target, 1.5)
+        self.restart_check("re-arm", self.node.since(mark)[0], t0, target)
+        self.rest("re-arm")
 
-    def ik_arm_ignores_old_target(self, label: str) -> None:
+    def arm_ignores_old_target(self, label: str) -> None:
         """Arm after a target was published at REST: that target must never be used."""
         q_rest = self.node.q()
         self.posture = q_rest
@@ -666,7 +554,7 @@ class Gate:
             if solution is not None:
                 break
         else:
-            self.r.check("ik_target far: a reachable 0.3 m target", False, "none found")
+            self.r.check("far: a reachable 0.3 m target", False, "none found")
             return
         print(
             f"  far target {dp} m from the start pose; its IK is "
@@ -681,17 +569,17 @@ class Gate:
         step_count = np.sum([s.step for s in states], axis=0)
         beyond = np.max([np.abs(s.q_ik - s.q_meas) for s in states], axis=0)
         self.r.check(
-            "ik_target far 0.3 m: gap_clamped fires (q_ik farther than the gap from q_meas)",
+            "far 0.3 m: gap_clamped fires (q_ik farther than the gap from q_meas)",
             bool(np.any(gap_count > 0)),
             f"messages gap-clamped per joint {gap_count.astype(int).tolist()} of {len(states)}; "
             f"max |q_ik - q_meas| {fmt(beyond)} rad",
         )
         self.r.check(
-            "ik_target far 0.3 m: step_clamped fires",
+            "far 0.3 m: step_clamped fires",
             bool(np.any(step_count > 0)),
             f"messages step-clamped per joint {step_count.astype(int).tolist()} of {len(states)}",
         )
-        self._bounds("ik_target far 0.3 m", states)
+        self._bounds("far 0.3 m", states)
         mm, deg = pose_error(self.kin.fk(self.node.q()), target)
         # Counted in updates: from the first that moved the output to the first whose q_meas is
         # within 1 mm and 0.5 deg. At max_joint_step_rad per update that takes at least
@@ -704,7 +592,7 @@ class Gate:
             math.ceil(float(np.max(np.abs(states[there].q_meas - q) / self.max_step))) if ok else 0
         )
         self.r.check(
-            "ik_target far 0.3 m: reached in the end, no faster than the step clamp allows",
+            "far 0.3 m: reached in the end, no faster than the step clamp allows",
             ok and mm < REACH_MM and deg < REACH_DEG and updates >= bound,
             f"{mm:.2f} mm / {deg:.2f} deg after 4 s; within 1 mm / 0.5 deg after {updates} "
             f"updates ({(states[there].t - t0) * 1000 if ok else float('nan'):.0f} ms); "
@@ -724,28 +612,28 @@ class Gate:
         late = [s for s in after if s.t > last + timeout + 0.05]
         settle = [j for j in joints if j[0] > last + timeout + 0.05]
         self.r.check(
-            "ik_target stale: stopping the targets sets stale=1 after target_timeout_s",
+            "stale: stopping the targets sets stale=1 after target_timeout_s",
             0.8 * timeout <= first_stale <= timeout + 0.05 and late and all(s.stale for s in late),
             f"first stale message {first_stale * 1000:.0f} ms after the last target "
             f"(timeout {timeout * 1000:.0f} ms); {len(late)} later messages all stale",
         )
         self.r.check(
-            "ik_target stale: the output returns to the measured position, the arm stops",
+            "stale: the output returns to the measured position, the arm stops",
             all(np.array_equal(s.q_out, s.q_meas) for s in late) and stationary(settle) == 0.0,
             f"q_out = q_meas in {sum(np.array_equal(s.q_out, s.q_meas) for s in late)}/"
             f"{len(late)}; joint change after stale {stationary(settle):.3g} rad",
         )
         self.r.check(
-            "ik_target stale: throttled warning on /rosout",
+            "stale: throttled warning on /rosout",
             any("No target for" in m for _, m in logs),
             next((m for _, m in logs if "No target" in m), "none"),
         )
-        self._bounds("ik_target stale fallback", after)
+        self._bounds("stale fallback", after)
         mark = self.node.mark()
         t0 = time.monotonic()
-        self.reach("ik_target resume after stale", p0, 2.0)
+        self.reach("resume after stale", p0, 2.0)
         states, _, _ = self.node.since(mark)
-        self.restart_check("ik_target resume", states, t0, p0)
+        self.restart_check("resume", states, t0, p0)
 
     def two_publishers(self, p0: pin.SE3) -> None:
         """crisp ignores /lbr/target_pose while it has two publishers; so must the passthrough."""
@@ -760,19 +648,19 @@ class Gate:
         moved = max(stationary(joints), float(np.max(np.abs(self.node.q() - q_before))))
         held = bool(states) and all(s.stale and np.array_equal(s.q_out, s.q_meas) for s in states)
         self.r.check(
-            "ik_target two publishers: the targets are ignored, the output stays measured",
+            "two publishers: the targets are ignored, the output stays measured",
             held and moved == 0.0,
             f"{len(states)} messages, all stale with q_out = q_meas: {held}; "
             f"largest joint change {moved:.3g} rad while a target 20 mm away streamed",
         )
         self.r.check(
-            "ik_target two publishers: throttled warning on /rosout",
+            "two publishers: throttled warning on /rosout",
             any("Ignoring targets" in m for _, m in logs),
             next((m for _, m in logs if "Ignoring targets" in m), "none"),
         )
         self.node.destroy_publisher(second)
         time.sleep(1.0)
-        self.reach("ik_target one publisher again", target, 2.0)
+        self.reach("one publisher again", target, 2.0)
         self.node.stream(p0, 2.0)
 
     def restart_check(self, label: str, states: list[State], t0: float, target) -> None:
@@ -791,102 +679,8 @@ class Gate:
             f"(the step: {fmt(np.abs(fresh.q_ik - fresh.q_meas)) if fresh else 'n/a'})",
         )
 
-    def offset_lagged(self, taus: list[float]) -> bool:
-        match = re.search(
-            r'name="position_state_following_offset">\s*([-+0-9.eE]+)\s*<', self.node.urdf
-        )
-        if not match:
-            print(
-                "REFUSED: the robot_description has no position_state_following_offset: start "
-                "`pixi run -e jazzy mock-offset`"
-            )
-            return False
-        d = float(match.group(1))
-        print(f"\n== lagged, offset mock: q_meas(k) = q_out(k-1) + {d}")
-        # measured copies q_meas, so on this mock the arm drifts d per update.
-        if self.set_mode("measured") and self.arm("measured (offset)"):
-            mark = self.node.mark()
-            time.sleep(0.3)
-            states, _, _ = self.node.since(mark)
-            self.rest("measured (offset)")
-            pairs = consecutive(states, d)
-            self.r.check(
-                "measured (offset): q_out = q_meas exactly while q_meas steps d every update",
-                len(pairs) > 50 and all(np.array_equal(s.q_out, s.q_meas) for s in states),
-                f"{len(pairs)} successive updates, every message identical",
-            )
-        for tau in taus:
-            if not (
-                self.set_mode("lagged", f"lag_time_constant_s={tau}")
-                and self.arm(f"lagged tau {tau}")
-            ):
-                continue
-            mark = self.node.mark()
-            time.sleep(0.3)
-            states, _, _ = self.node.since(mark)
-            self.rest(f"lagged tau {tau}")
-            pairs = consecutive(states, d)
-            # Each update q_meas steps by d off the last output; the low-pass takes a of it.
-            a = np.array([(b.q_out - a_.q_out) / (b.q_meas - a_.q_out) for a_, b in pairs])
-            if a.size == 0:
-                self.r.check(f"lagged tau {tau}: per-update response", False, "no successive pairs")
-                continue
-            a_med = float(np.median(a))
-            tau_est = -DT / math.log(1 - a_med) if 0 < a_med < 1 else float("nan")
-            expected = -math.expm1(-DT / tau)
-            ticks = math.log(1 / math.e) / math.log(1 - a_med) if 0 < a_med < 1 else float("nan")
-            # a uses each update's own period, which jitters around 2 ms on a kernel that is not
-            # realtime.
-            lo, hi = np.percentile(a, [5, 95])
-            self.r.check(
-                f"lagged tau {tau}: per-update fraction a = 1 - exp(-dt/tau) of the measured step",
-                abs(a_med - expected) < 0.02 * expected
-                and expected * 0.9 < lo <= hi < expected * 1.1,
-                f"a median {a_med:.5f} (p5-p95 {lo:.5f}-{hi:.5f}) vs {expected:.5f} at dt 2 ms, "
-                f"over {len(pairs)} updates x 7 joints -> tau {tau_est * 1000:.2f} ms, 63 % of a "
-                f"step in {ticks:.2f} updates = {ticks * DT * 1000:.1f} ms",
-            )
-            flags = sum(int(s.gap.any() or s.step.any()) for s in states)
-            gap = np.max([np.abs(s.q_out - s.q_meas) for s in states], axis=0)
-            self.r.check(
-                f"lagged tau {tau}: q_meas - q_out settles at (1 - a) d, no clamp",
-                flags == 0 and np.allclose(gap, (1 - expected) * d, rtol=0.05),
-                f"max |q_out - q_meas| {fmt(gap)} vs (1-a)d = {(1 - expected) * d:.4g}; "
-                f"{flags} messages with a clamp",
-            )
-        return True
-
-
-def run(node: Mock, results: Results, args: argparse.Namespace) -> bool:
-    gate = Gate(node, results)
-    if not gate.setup(home=not args.offset_lagged):
-        return False
-    try:
-        if args.offset_lagged:
-            return gate.offset_lagged(args.taus)
-        gate.measured()
-        gate.lagged()
-        gate.ik_target()
-        return True
-    finally:
-        if node.cell() != "REST":
-            node.try_switch(activate=REST, deactivate=ARMED)
-        code, _ = run_tool("set", "measured")
-        print(f"\nleft at {node.cell()}, set measured: exit {code}")
-
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    parser.add_argument(
-        "--offset-lagged",
-        action="store_true",
-        help="only the lagged time-constant check, on the offset mock",
-    )
-    parser.add_argument("--taus", type=float, nargs="+", default=[0.008, 0.02, 0.05])
-    args = parser.parse_args()
-
     problem = environment_problem()
     if problem:
         print(f"REFUSED: {problem}. This check runs on the loopback mock only.", file=sys.stderr)
@@ -897,8 +691,15 @@ def main() -> int:
     results = Results()
     try:
         with spinning(node):
-            if not run(node, results, args):
+            gate = Gate(node, results)
+            if not gate.setup():
                 return 2
+            try:
+                gate.run()
+            finally:
+                if node.cell() != "REST":
+                    node.try_switch(activate=REST, deactivate=ARMED)
+                print(f"\nleft at {node.cell()}")
     finally:
         rclpy.try_shutdown()
     return results.summary()

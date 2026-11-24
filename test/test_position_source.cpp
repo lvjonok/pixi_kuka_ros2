@@ -54,9 +54,11 @@ void urdf_limits(Eigen::VectorXd *lower, Eigen::VectorXd *upper) {
   }
 }
 
+// The gap the expectations below are written for: 0.05 rad on A1 to A3, down to 0.015 on A7.
 PositionSourceParams ik_params() {
   PositionSourceParams params;
-  params.mode = PositionSourceMode::kIkTarget;
+  params.sunrise_joint_stiffness.assign(7, 200.0);
+  params.max_spring_torque_nm = {10.0, 10.0, 10.0, 8.0, 5.0, 5.0, 3.0};
   return params;
 }
 
@@ -103,19 +105,6 @@ bool bit_identical(const Eigen::VectorXd &a, const Eigen::VectorXd &b) {
          std::memcmp(a.data(), b.data(), sizeof(double) * static_cast<std::size_t>(a.size())) == 0;
 }
 
-TEST(PositionSourceMode, ParsesTheThreeNamesOnly) {
-  PositionSourceMode mode;
-  EXPECT_TRUE(parse_position_source_mode("measured", &mode));
-  EXPECT_EQ(mode, PositionSourceMode::kMeasured);
-  EXPECT_TRUE(parse_position_source_mode("lagged", &mode));
-  EXPECT_EQ(mode, PositionSourceMode::kLagged);
-  EXPECT_TRUE(parse_position_source_mode("ik_target", &mode));
-  EXPECT_EQ(mode, PositionSourceMode::kIkTarget);
-  for (const char *bad : {"", "Measured", "ik", "lag", "measured "}) {
-    EXPECT_FALSE(parse_position_source_mode(bad, &mode)) << bad;
-  }
-}
-
 TEST(PositionSourceParams, InvalidValuesFailConfigure) {
   PositionSource source;
   std::string error;
@@ -144,27 +133,12 @@ TEST(PositionSourceParams, InvalidValuesFailConfigure) {
   params = ik_params();
   params.target_timeout_s = 0.0;
   expect_rejected(params, "timeout 0");
-  params = ik_params();
-  params.lag_time_constant_s = -0.001;
-  expect_rejected(params, "negative tau");
 
-  // `measured` uses none of the per-joint arrays, so their sizes do not matter there.
-  params = PositionSourceParams();
-  params.max_joint_step_rad.assign(3, 0.004);
-  EXPECT_TRUE(source.configure(7, params, &error)) << error;
-
-  // A margin that leaves no range is caught once a model is loaded, in ik_target, the one mode
-  // that uses it. The others still configure; their kinematics are just not ready.
+  // A margin that leaves no range is caught once a model is loaded.
   ASSERT_TRUE(source.load_model(urdf(), kJoints, &error)) << error;
   params = ik_params();
   params.joint_limit_margin_rad = 2.5;
   expect_rejected(params, "margin wider than A2's range");
-  for (const auto mode : {PositionSourceMode::kMeasured, PositionSourceMode::kLagged}) {
-    params.mode = mode;
-    EXPECT_TRUE(source.configure(7, params, &error)) << to_string(mode) << ": " << error;
-    EXPECT_FALSE(source.kinematics_ready()) << to_string(mode);
-    EXPECT_NE(source.kinematics_error().find("joint_limit_margin_rad"), std::string::npos);
-  }
 }
 
 TEST(PositionSourceModel, RejectsJointsTheUrdfLacks) {
@@ -174,85 +148,6 @@ TEST(PositionSourceModel, RejectsJointsTheUrdfLacks) {
   EXPECT_FALSE(source.load_model(urdf(), {"lbr_A1", "lbr_A1"}, &error));
   EXPECT_FALSE(source.load_model("<robot", kJoints, &error));
   EXPECT_FALSE(source.model_loaded());
-}
-
-TEST(PositionSourceMeasured, IsBitIdenticalToTheMeasuredPosition) {
-  PositionSource source = make_source(PositionSourceParams());
-  std::mt19937 random(7);
-  std::uniform_real_distribution<double> angle(-2.9, 2.9);
-  Eigen::VectorXd q(7);
-  for (int index = 0; index < 7; ++index) q[index] = angle(random);
-  source.activate(q);
-  EXPECT_TRUE(bit_identical(source.q_out(), q));
-
-  PoseTarget target = fk(source, nominal());
-  target.position.x() += 0.3;
-  const double periods[] = {kDt, 0.0, -1.0, std::numeric_limits<double>::quiet_NaN(), 1.0};
-  for (int update = 0; update < 1000; ++update) {
-    // Arbitrary jumps, including ones far beyond any step limit.
-    for (int index = 0; index < 7; ++index) q[index] = angle(random);
-    q[update % 7] = std::nextafter(q[update % 7], 10.0);
-    source.update(q, periods[update % 5], update % 3 == 0 ? &target : nullptr);
-    ASSERT_TRUE(bit_identical(source.q_out(), q)) << "update " << update;
-    EXPECT_EQ(source.events(), 0u);
-    EXPECT_FALSE(source.stale());
-    EXPECT_EQ(source.gap_clamped().sum(), 0.0);
-    EXPECT_EQ(source.step_clamped().sum(), 0.0);
-  }
-}
-
-TEST(PositionSourceLagged, StepResponseFollowsTau) {
-  for (const double tau : {0.008, 0.02, 0.05}) {
-    auto params = unclamped(PositionSourceParams());
-    params.mode = PositionSourceMode::kLagged;
-    params.lag_time_constant_s = tau;
-    PositionSource source = make_source(params);
-    Eigen::VectorXd q = nominal();
-    source.activate(q);
-    const double step = 0.01;
-    q[1] += step;
-    // The exact discretisation of a first-order lag: the response is 1 - exp(-t / tau).
-    const double alpha = 1.0 - std::exp(-kDt / tau);
-    int at_63 = -1;
-    for (int update = 1; update <= 2000; ++update) {
-      source.update(q, kDt, nullptr);
-      const double expected = step * (1.0 - std::pow(1.0 - alpha, update));
-      ASSERT_NEAR(source.q_out()[1] - nominal()[1], expected, 1e-12) << "tau " << tau;
-      ASSERT_NEAR(expected, step * (1.0 - std::exp(-update * kDt / tau)), 1e-12) << "tau " << tau;
-      // Every other joint is untouched.
-      ASSERT_EQ(source.q_out()[0], nominal()[0]);
-      if (at_63 < 0 && source.q_out()[1] - nominal()[1] >= step * (1.0 - std::exp(-1.0))) {
-        at_63 = update;
-      }
-    }
-    // 63 % is reached at t = tau, to the tick.
-    EXPECT_NEAR(at_63 * kDt, tau, 1.01 * kDt) << "tau " << tau;
-    EXPECT_NEAR(source.q_out()[1], q[1], 1e-9);
-    EXPECT_FALSE(source.stale());
-  }
-}
-
-TEST(PositionSourceLagged, ZeroTauIsTheMeasuredPositionAndClampsStillApply) {
-  auto params = PositionSourceParams();
-  params.mode = PositionSourceMode::kLagged;
-  params.lag_time_constant_s = 0.0;
-  PositionSource source = make_source(params);
-  Eigen::VectorXd q = nominal();
-  source.activate(q);
-  q[0] += 0.002;  // under the step limit: passes through
-  source.update(q, kDt, nullptr);
-  EXPECT_EQ(source.q_out()[0], q[0]);
-  q[0] += 0.03;  // over it, inside A1's 0.05 rad gap: 0.004 per update
-  const double before = source.q_out()[0];
-  source.update(q, kDt, nullptr);
-  EXPECT_NEAR(source.q_out()[0] - before, 0.004, 1e-15);
-  EXPECT_EQ(source.step_clamped()[0], 1.0);
-  EXPECT_EQ(source.gap_clamped()[0], 0.0);
-  q[0] += 0.1;  // farther than the gap: the step limit gives way to it
-  source.update(q, kDt, nullptr);
-  EXPECT_NEAR(q[0] - source.q_out()[0], 0.05, 1e-15);
-  EXPECT_EQ(source.step_clamped()[0], 1.0);
-  EXPECT_EQ(source.gap_clamped()[0], 1.0);
 }
 
 TEST(PositionSourceIk, ConvergesToReachableTargets) {
@@ -385,21 +280,17 @@ TEST(PositionSourceIk, OutputStepIsClampedPerJoint) {
 TEST(PositionSourceClamps, GapHoldsWhileTheArmOutrunsTheStepLimit) {
   struct Case {
     const char *name;
-    PositionSourceMode mode;
-    bool targets;           // ik_target: stream a target (else: the stale fallback)
+    bool targets;           // stream a target (else: the stale fallback)
     double max_step;        // every joint
     int joint;
     double speed_rad_s;
   };
   const Case cases[] = {
-      {"lagged A7 2.35 rad/s", PositionSourceMode::kLagged, false, 0.004, 6, 2.35},
-      {"ik_target stale A7 2.35 rad/s", PositionSourceMode::kIkTarget, false, 0.004, 6, -2.35},
-      {"ik_target streaming A7 2.35 rad/s", PositionSourceMode::kIkTarget, true, 0.004, 6, 2.35},
-      {"lagged A1 0.6 rad/s, step 0.001", PositionSourceMode::kLagged, false, 0.001, 0, 0.6},
+      {"stale A7 2.35 rad/s", false, 0.004, 6, -2.35},
+      {"streaming A7 2.35 rad/s", true, 0.004, 6, 2.35},
   };
   for (const Case &c : cases) {
     auto params = ik_params();
-    params.mode = c.mode;
     params.max_joint_step_rad.assign(7, c.max_step);
     const Eigen::VectorXd gap = gap_of(params);
     PositionSource source = make_source(params);
@@ -623,7 +514,7 @@ TEST(PositionSourceIk, MissingFrameOrModelFallsBackToMeasured) {
 }
 
 // crisp reads the target in the model's world frame; a base_frame offset from it would put the
-// IK on another pose, so ik_target falls back instead.
+// IK on another pose, so the output falls back to the measured position instead.
 TEST(PositionSourceIk, BaseFrameOffsetFromTheWorldFallsBack) {
   std::string mounted = urdf();
   const std::string child = "<child link=\"lbr_link_0\"/>";
@@ -657,27 +548,22 @@ TEST(PositionSourceRealtime, NoMallocCheckIsArmed) {
 }
 
 TEST(PositionSourceRealtime, UpdateDoesNotAllocate) {
-  for (const auto mode :
-       {PositionSourceMode::kMeasured, PositionSourceMode::kLagged, PositionSourceMode::kIkTarget}) {
-    auto params = ik_params();
-    params.mode = mode;
-    PositionSource source = make_source(params);
-    const Eigen::VectorXd q_meas = nominal();
-    PoseTarget target = fk(source, nominal());
-    target.position.x() += 0.2;
-    PoseTarget bad = target;
-    bad.position.x() = std::numeric_limits<double>::quiet_NaN();
-    Eigen::internal::set_is_malloc_allowed(false);
-    source.activate(q_meas);
-    for (int update = 0; update < 200; ++update) {
-      // Targets, gaps in them (stale), a bad one, a bad period: every branch.
-      const PoseTarget *next = update < 50 ? &target : update == 120 ? &bad
-                               : update > 150 ? &target : nullptr;
-      source.update(q_meas, update == 160 ? 0.0 : kDt, next);
-    }
-    Eigen::internal::set_is_malloc_allowed(true);
-    EXPECT_TRUE(source.q_out().allFinite()) << to_string(mode);
+  PositionSource source = make_source(ik_params());
+  const Eigen::VectorXd q_meas = nominal();
+  PoseTarget target = fk(source, nominal());
+  target.position.x() += 0.2;
+  PoseTarget bad = target;
+  bad.position.x() = std::numeric_limits<double>::quiet_NaN();
+  Eigen::internal::set_is_malloc_allowed(false);
+  source.activate(q_meas);
+  for (int update = 0; update < 200; ++update) {
+    // Targets, gaps in them (stale), a bad one, a bad period: every branch.
+    const PoseTarget *next = update < 50 ? &target : update == 120 ? &bad
+                             : update > 150 ? &target : nullptr;
+    source.update(q_meas, update == 160 ? 0.0 : kDt, next);
   }
+  Eigen::internal::set_is_malloc_allowed(true);
+  EXPECT_TRUE(source.q_out().allFinite());
 }
 
 }  // namespace

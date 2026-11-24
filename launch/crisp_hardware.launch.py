@@ -84,8 +84,9 @@ def _nodes(context) -> list:
         ]
 
     # REST: the trajectory controller holds a fixed position command, and Sunrise's joint spring
-    # holds the arm on it. The passthrough's command follows the arm, so nothing would hold it:
-    # it stays inactive until it comes in with a torque overlay, in one strict switch.
+    # holds the arm on it. The passthrough's command stays within a small gap of the arm, so it
+    # would not hold it: it stays inactive until it comes in with a torque overlay, in one strict
+    # switch.
     active_controllers = Node(
         package="controller_manager",
         executable="spawner",

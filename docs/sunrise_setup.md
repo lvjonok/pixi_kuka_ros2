@@ -276,9 +276,9 @@ Dialog answers for this workspace:
 `LBRServer.java` hardcodes `new JointImpedanceControlMode(200, 200, 200, 200, 200,
 200, 200)`, that is 200 Nm/rad on every axis. In `TORQUE` client command mode the torque
 overlay is added on top of that impedance law, around the position FRI carries. At REST
-that position is fixed and the spring holds the arm. ARMED with `position_source`
-`measured` it follows the arm and the spring adds nothing
-([`position_source.md`](position_source.md)).
+that position is fixed and the spring holds the arm. ARMED it is the IK of crisp's target,
+held within a bounded gap of the arm, and the spring pulls toward the target with a bounded
+torque ([`position_source.md`](position_source.md)).
 
 Lowering the stiffness toward zero means the arm is held only by the ROS-side torque
 commands, which is a separate commissioning decision with its own safety review, not a
@@ -344,18 +344,19 @@ smartPAD log to confirm them.
 **`sunrise_joint_stiffness` of `fri_position_passthrough_controller` must equal the preset the
 app is running.** FRI does not report the stiffness, so the controller cannot read it; it takes
 the parameter on trust and computes its gap clamp from it,
-`|q_cmd - q| <= max_spring_torque_nm / sunrise_joint_stiffness`. A config left at 200 while the
-app runs at 1000 lets through five times the intended spring torque. So:
+`|q_cmd - q| <= max_spring_torque_nm / sunrise_joint_stiffness`. A parameter of 200 while the
+app runs at 1000 lets through five times the intended spring torque; a parameter above the
+app's stiffness gives a weaker spring. `config/controllers.yaml` has 1000 on A1 to A3 and 500
+on A4 to A7, which no preset exceeds. So:
 
 - Change the preset and the parameter in the same step, with the controller at REST; the
-  parameter takes effect at the next activation. `position-source set` refuses a stiffness other
-  than 200 for `lagged` and `ik_target` unless given `--limit-change-reviewed` (after the review
-  the commissioning protocol requires); it prints the resulting gap and torque first.
+  parameter takes effect at the next activation
+  ([`position_source.md`](position_source.md#the-sunrise-application-and-sunrise_joint_stiffness)).
 - Write the running preset (stiffness and damping) into the session's notes; damping is not a
   controller parameter and appears nowhere else.
 - Any preset above 200 only after the safety review
   [`commissioning_protocol.md`](commissioning_protocol.md) requires, and only after the
-  `position_source` mode in use has been checked on the arm at 200
+  passthrough has been checked on the arm at 200
   ([`position_source.md`](position_source.md)).
 
 ## Third app: `FRITorqueDriver`

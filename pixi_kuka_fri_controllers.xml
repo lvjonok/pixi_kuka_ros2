@@ -5,7 +5,7 @@
     type="pixi_kuka_ros2::FRIPositionPassthroughController"
     base_class_type="controller_interface::ControllerInterface">
     <description>
-      Mirrors measured joint positions into the FRI position command interfaces while a separate controller supplies torque overlays.
+      Writes the FRI position command under a torque overlay: the IK of the Cartesian target, held near the measured position.
     </description>
   </class>
   <class

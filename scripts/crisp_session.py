@@ -80,7 +80,9 @@ def main() -> int:
         help="JSON with joint_names and position (rad): the --home target in place of HOME_DEGREES",
     )
     parser.add_argument(
-        "--switch", metavar="CONTROLLER", help="a torque controller, or zero_effort_controller"
+        "--switch",
+        metavar="CONTROLLER",
+        help="cartesian_impedance_controller, or zero_effort_controller",
     )
     args = parser.parse_args()
     if args.home and args.switch:

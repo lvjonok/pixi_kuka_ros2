@@ -1,6 +1,7 @@
 #pragma once
 
-// The law of what FRIPositionPassthroughController writes into the FRI position field
+// The law of what FRIPositionPassthroughController writes into the FRI position field: the
+// differential IK of a Cartesian target, held near the measured position
 // (docs/position_source.md).
 
 #include <cstddef>
@@ -19,15 +20,7 @@
 
 namespace pixi_kuka_ros2 {
 
-// The values are the `mode` slot of ~/state.
-enum class PositionSourceMode : int { kMeasured = 0, kLagged = 1, kIkTarget = 2 };
-
-bool parse_position_source_mode(const std::string &text, PositionSourceMode *mode);
-const char *to_string(PositionSourceMode mode);
-
 struct PositionSourceParams {
-  PositionSourceMode mode = PositionSourceMode::kMeasured;
-  double lag_time_constant_s = 0.008;
   std::string end_effector_frame = "lbr_link_ee";
   std::string base_frame = "lbr_link_0";
   double target_filter = 0.9;
@@ -35,10 +28,11 @@ struct PositionSourceParams {
   double ik_damping = 0.01;
   double nullspace_gain = 0.05;
   double joint_limit_margin_rad = 0.05;
-  // One entry per joint; not read in `measured`.
+  // One entry per joint.
   std::vector<double> max_joint_step_rad = std::vector<double>(7, 0.004);
-  std::vector<double> sunrise_joint_stiffness = std::vector<double>(7, 200.0);
-  std::vector<double> max_spring_torque_nm = {10.0, 10.0, 10.0, 8.0, 5.0, 5.0, 3.0};
+  std::vector<double> sunrise_joint_stiffness = {1000.0, 1000.0, 1000.0, 500.0,
+                                                 500.0,  500.0,  500.0};
+  std::vector<double> max_spring_torque_nm = {5.0, 5.0, 5.0, 4.0, 2.5, 2.5, 1.5};
 };
 
 // A target pose of end_effector_frame in base_frame. The orientation need not be normalised.
@@ -56,15 +50,14 @@ class PositionSource {
   static constexpr std::uint32_t kNoKinematics = 1u << 3;
   static constexpr std::uint32_t kInvalidPeriod = 1u << 4;
 
-  // Not realtime. The model `ik_target` integrates on: the URDF with every joint not in `joints`
-  // locked at neutral. On failure `ik_target` falls back to the measured position.
+  // Not realtime. The model the IK integrates on: the URDF with every joint not in `joints`
+  // locked at neutral. On failure the output is the measured position.
   bool load_model(const std::string &urdf_xml, const std::vector<std::string> &joints,
                   std::string *error);
 
-  // Not realtime. False with *error if a parameter is invalid. A missing frame, a base_frame
-  // that is not the model's world and, outside `ik_target`, a joint margin that leaves no range
-  // are not errors: kinematics_ready() turns false and `ik_target` falls back to the measured
-  // position (kinematics_error() says why).
+  // Not realtime. False with *error if a parameter is invalid. A missing model or frame and a
+  // base_frame that is not the model's world are not errors: kinematics_ready() turns false and
+  // the output is the measured position (kinematics_error() says why).
   bool configure(std::size_t joint_count, const PositionSourceParams &params, std::string *error);
 
   // Realtime. Until a target arrives the output is the measured position.
@@ -79,14 +72,14 @@ class PositionSource {
   bool kinematics_ready() const { return kinematics_ready_; }
   const std::string &kinematics_error() const { return kinematics_error_; }
 
-  // After update(): the output, the mode's unclamped proposal (`ik_target`: q_ik; `lagged`:
-  // the low-pass before the clamps; otherwise q_meas), and 0/1 per joint where a clamp acted.
+  // After update(): the output, the IK's configuration before the clamps (the measured position
+  // while stale()), and 0/1 per joint where a clamp acted.
   const Eigen::VectorXd &q_out() const { return q_out_; }
   const Eigen::VectorXd &q_ik() const { return q_ik_; }
   const Eigen::VectorXd &gap_clamped() const { return gap_clamped_; }
   const Eigen::VectorXd &step_clamped() const { return step_clamped_; }
   const Eigen::VectorXd &gap() const { return gap_; }
-  // `ik_target` only: the output is the measured fallback (no target yet, stale, or invalid).
+  // The output is the measured position: no target yet, a stale one, or an invalid input.
   bool stale() const { return stale_; }
   std::uint32_t events() const { return events_; }
 
@@ -134,7 +127,6 @@ class PositionSource {
   Eigen::VectorXd q_pin_;
   Eigen::VectorXd posture_pull_;  // model tangent order
   Eigen::VectorXd dq_;            // model tangent order
-  Eigen::VectorXd proposal_;
   Eigen::Matrix<double, 6, Eigen::Dynamic> jacobian_;
   Eigen::Matrix<double, 6, 1> error_;
   Eigen::Matrix<double, 6, 1> rhs_;

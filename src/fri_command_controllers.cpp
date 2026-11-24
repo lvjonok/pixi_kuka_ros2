@@ -21,15 +21,15 @@
 namespace pixi_kuka_ros2 {
 
 // FRI's torque mode takes a joint position with every torque overlay, and Sunrise's joint spring
-// is centred on it. This controller writes that position.
+// is centred on it. This controller writes that position: the IK of crisp's Cartesian target,
+// held near the measured position.
 class FRIPositionPassthroughController : public controller_interface::ControllerInterface {
  public:
   controller_interface::CallbackReturn on_init() override {
     try {
       auto_declare<std::vector<std::string>>("joints", {});
       const PositionSourceParams defaults;
-      auto_declare<std::string>("position_source", "measured");
-      auto_declare<double>("lag_time_constant_s", defaults.lag_time_constant_s);
+      auto_declare<std::string>("position_source", kPositionSource);
       auto_declare<std::string>("target_topic", "target_pose");
       auto_declare<std::string>("end_effector_frame", defaults.end_effector_frame);
       auto_declare<std::string>("base_frame", defaults.base_frame);
@@ -79,11 +79,11 @@ class FRIPositionPassthroughController : public controller_interface::Controller
     source_ = PositionSource();
     if (get_robot_description().empty()) {
       RCLCPP_WARN(get_node()->get_logger(),
-                  "No robot_description from the controller manager: ik_target will fall back "
-                  "to the measured position.");
+                  "No robot_description from the controller manager: the output stays the "
+                  "measured position.");
     } else if (!source_.load_model(get_robot_description(), joints_, &error)) {
       RCLCPP_WARN(get_node()->get_logger(),
-                  "No kinematic model (%s): ik_target will fall back to the measured position.",
+                  "No kinematic model (%s): the output stays the measured position.",
                   error.c_str());
     }
     if (!configure_source(&error)) {
@@ -128,24 +128,17 @@ class FRIPositionPassthroughController : public controller_interface::Controller
     source_.activate(q_meas_);
 
     const auto &params = source_.params();
-    if (params.mode == PositionSourceMode::kIkTarget) {
-      RCLCPP_INFO(
-          get_node()->get_logger(),
-          "position_source: ik_target (%s in %s from '%s', filter %.3f, timeout %.3f s, "
-          "damping %.4f, nullspace %.3f, margin %.3f rad).",
-          params.end_effector_frame.c_str(), params.base_frame.c_str(),
-          target_subscription_->get_topic_name(), params.target_filter, params.target_timeout_s,
-          params.ik_damping, params.nullspace_gain, params.joint_limit_margin_rad);
-      if (!source_.kinematics_ready()) {
-        RCLCPP_ERROR(get_node()->get_logger(),
-                     "ik_target without kinematics (%s): the output stays the measured position.",
-                     source_.kinematics_error().c_str());
-      }
-    } else if (params.mode == PositionSourceMode::kLagged) {
-      RCLCPP_INFO(get_node()->get_logger(), "position_source: lagged (tau %.4f s).",
-                  params.lag_time_constant_s);
-    } else {
-      RCLCPP_INFO(get_node()->get_logger(), "position_source: measured.");
+    RCLCPP_INFO(
+        get_node()->get_logger(),
+        "position_source: ik_target (%s in %s from '%s', filter %.3f, timeout %.3f s, "
+        "damping %.4f, nullspace %.3f, margin %.3f rad).",
+        params.end_effector_frame.c_str(), params.base_frame.c_str(),
+        target_subscription_->get_topic_name(), params.target_filter, params.target_timeout_s,
+        params.ik_damping, params.nullspace_gain, params.joint_limit_margin_rad);
+    if (!source_.kinematics_ready()) {
+      RCLCPP_ERROR(get_node()->get_logger(),
+                   "No kinematics (%s): the output stays the measured position.",
+                   source_.kinematics_error().c_str());
     }
     return write_commands() ? controller_interface::CallbackReturn::SUCCESS
                             : controller_interface::CallbackReturn::ERROR;
@@ -203,14 +196,19 @@ class FRIPositionPassthroughController : public controller_interface::Controller
   };
   using StatePublisher = realtime_tools::RealtimePublisher<std_msgs::msg::Float64MultiArray>;
 
+  // The parameter has one value: the consumer's preflight reads it by name and records it for
+  // every run. The number is the first value of ~/state, which recordings index by position.
+  static constexpr const char *kPositionSource = "ik_target";
+  static constexpr double kPositionSourceInState = 2.0;
+
   bool read_parameters(PositionSourceParams *params, std::string *topic, std::string *error) {
     const auto node = get_node();
-    const std::string mode = node->get_parameter("position_source").as_string();
-    if (!parse_position_source_mode(mode, &params->mode)) {
-      *error = "position_source '" + mode + "' is not one of measured, lagged, ik_target.";
+    const std::string source = node->get_parameter("position_source").as_string();
+    if (source != kPositionSource) {
+      *error = "position_source '" + source + "' is not " + kPositionSource +
+               ", the only value there is.";
       return false;
     }
-    params->lag_time_constant_s = node->get_parameter("lag_time_constant_s").as_double();
     *topic = node->get_parameter("target_topic").as_string();
     params->end_effector_frame = node->get_parameter("end_effector_frame").as_string();
     params->base_frame = node->get_parameter("base_frame").as_string();
@@ -222,7 +220,6 @@ class FRIPositionPassthroughController : public controller_interface::Controller
     params->sunrise_joint_stiffness =
         node->get_parameter("sunrise_joint_stiffness").as_double_array();
     params->max_spring_torque_nm = node->get_parameter("max_spring_torque_nm").as_double_array();
-
     params->max_joint_step_rad = node->get_parameter("max_joint_step_rad").as_double_array();
     if (topic->empty()) {
       *error = "target_topic must not be empty.";
@@ -338,7 +335,7 @@ class FRIPositionPassthroughController : public controller_interface::Controller
     }
     if (events & PositionSource::kNoKinematics) {
       RCLCPP_WARN_THROTTLE(
-          logger, clock, 5000, "ik_target without kinematics (%s): the measured position.",
+          logger, clock, 5000, "No kinematics (%s): the measured position.",
           source_.kinematics_error().c_str());
     }
     if (events & PositionSource::kInvalidPeriod) {
@@ -353,7 +350,7 @@ class FRIPositionPassthroughController : public controller_interface::Controller
     }
     auto &data = state_publisher_->msg_.data;
     const auto n = static_cast<Eigen::Index>(joints_.size());
-    data[0] = static_cast<double>(static_cast<int>(source_.params().mode));
+    data[0] = kPositionSourceInState;
     data[1] = source_.stale() ? 1.0 : 0.0;
     const Eigen::VectorXd *const blocks[] = {&q_meas_, &source_.q_ik(), &source_.q_out(),
                                              &source_.gap_clamped(), &source_.step_clamped()};

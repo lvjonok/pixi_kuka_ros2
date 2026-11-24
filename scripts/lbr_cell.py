@@ -27,8 +27,9 @@ CARTESIAN = "cartesian_impedance_controller"
 TORQUE_CONTROLLERS = (CARTESIAN, "joint_impedance_controller")
 
 # REST: the trajectory controller holds a fixed position command and Sunrise's joint spring holds
-# the arm on it. ARMED: the passthrough's position command follows the arm and a torque controller
-# holds it. The passthrough with zero effort holds nothing: the arm sags.
+# the arm on it. ARMED: the passthrough's position command is the IK of the Cartesian target, so
+# the spring pulls toward the target with the Cartesian controller's torque. The passthrough with
+# zero effort does not hold the arm: the arm sags.
 REST = (TRAJECTORY, ZERO_EFFORT)
 ARMED = (PASSTHROUGH, CARTESIAN)
 

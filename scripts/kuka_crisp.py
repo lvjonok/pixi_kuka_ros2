@@ -19,7 +19,6 @@ from lbr_cell import (
     joint_limits,
     switch,
 )
-from position_source import running, source
 
 # lbr_fri_ros2's command guard ends the FRI session when a measured joint velocity passes the
 # description's limit.
@@ -47,8 +46,8 @@ def active_controllers(robot: Robot) -> set[str]:
 
 
 def safe_switch(robot: Robot, controller_name: str) -> None:
-    """Arm a torque controller from REST, go back to REST with zero_effort_controller, or change
-    the torque controller while ARMED.
+    """Arm cartesian_impedance_controller from REST, or go back to REST with
+    zero_effort_controller.
 
     crisp_py's own switcher and Robot.home() are not for this cell: the switcher deactivates every
     controller that is not a broadcaster, with BEST_EFFORT, and home() moves in a fixed 5 s.
@@ -59,10 +58,10 @@ def safe_switch(robot: Robot, controller_name: str) -> None:
             return
         if controller_name not in TORQUE_CONTROLLERS:
             raise RuntimeError(
-                f"refusing to switch to {controller_name} from REST: only a torque controller "
-                f"({', '.join(TORQUE_CONTROLLERS)}) or {ZERO_EFFORT} can be switched to"
+                f"refusing to switch to {controller_name} from REST: only {CARTESIAN} or "
+                f"{ZERO_EFFORT} can be switched to"
             )
-        check_position_source(robot, controller_name, armed=False)
+        check_follows_target(controller_name)
         switch(robot.node, activate=(PASSTHROUGH, controller_name), deactivate=REST)
     elif PASSTHROUGH not in active:
         raise RuntimeError(
@@ -73,33 +72,19 @@ def safe_switch(robot: Robot, controller_name: str) -> None:
         overlays = sorted(set(TORQUE_CONTROLLERS) & active)
         switch(robot.node, activate=REST, deactivate=(PASSTHROUGH, *overlays))
     else:
-        check_position_source(robot, controller_name, armed=True)
+        check_follows_target(controller_name)
         robot.controller_switcher_client.switch_controller(
             controller_name, controllers_that_should_be_active=HOLD_ACTIVE
         )
 
 
-def check_position_source(robot: Robot, controller_name: str, armed: bool) -> None:
-    """Raise unless the torque controller may run over the passthrough's position_source.
-
-    Under ik_target Sunrise's spring pulls toward the IK of /lbr/target_pose, which only
-    cartesian_impedance_controller follows.
-    """
-    if controller_name == CARTESIAN:
-        return
-    why = (
-        f"{controller_name} does not track {NS}/target_pose, and only {CARTESIAN} may run over a "
-        "passthrough that is not in `measured`. Go to REST and `position-source set measured` first"
-    )
-    refusing = f"refusing to switch to {controller_name}: {PASSTHROUGH}"
-    parameter = source(robot.node)
-    if parameter != "measured":
-        raise RuntimeError(f"{refusing} position_source is {parameter}. {why}")
-    if armed:
-        state = running(robot.node, 2.0)
-        mode = state["mode"] if state else "an unknown mode (no ~/state)"
-        if mode != "measured":
-            raise RuntimeError(f"{refusing} is running {mode}. {why}")
+def check_follows_target(controller_name: str) -> None:
+    """Raise for a torque controller other than the one that follows /lbr/target_pose."""
+    if controller_name != CARTESIAN:
+        raise RuntimeError(
+            f"refusing to switch to {controller_name}: Sunrise's spring pulls toward the IK of "
+            f"{NS}/target_pose, which only {CARTESIAN} follows"
+        )
 
 
 def move_to_home(
