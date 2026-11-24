@@ -4,7 +4,8 @@
 `repos/repos-fri-1.17.yaml`) and puts these four diffs on it with `git apply`, in the order
 below. Each one applies on the one before it. A checkout that already has them is left alone.
 
-They change `CartesianController` and `CartesianAdmittanceController`.
+All four change `CartesianController`; the second and the fourth change
+`CartesianAdmittanceController` as well.
 
 ## 1. crisp_controllers-introspection.patch
 

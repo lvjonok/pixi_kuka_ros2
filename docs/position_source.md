@@ -24,19 +24,19 @@ A target that is not finite is dropped, and the last good one stays in use until
 FRI does not report the stiffness of Sunrise's spring, so the controller takes it from the parameter
 `sunrise_joint_stiffness`. It holds the position within `max_spring_torque_nm / sunrise_joint_stiffness`
 of the measured one, the gap. The torque the spring then applies is the gap times the stiffness the
-application really runs:
+application really runs.
+
+**`sunrise_joint_stiffness` is the stiffness of the application that runs. A parameter below the
+application's is the unsafe side:** the spring exceeds `max_spring_torque_nm` by the ratio of the two. A
+parameter above the application's gives a weaker spring: the safe side.
 
 | Application on the cabinet | Its stiffness, Nm/rad | With the default parameters the spring pulls with at most |
 | --- | --- | --- |
-| [`FRITorqueDriver`](../sunrise/FRITorqueDriver.java) | 1000 on A1 to A3, 500 on A4 to A7 | `max_spring_torque_nm`: 5, 5, 5, 4, 2.5, 2.5, 1.5 Nm |
-| `LBRServer` | 200 on every joint | a fifth of that on A1 to A3 and two fifths on A4 to A7: 1, 1, 1, 1.6, 1, 1, 0.6 Nm |
+| [`FRITorqueDriver`](../sunrise/FRITorqueDriver.java), the one the cell runs | 1000 on A1 to A3, 500 on A4 to A7 | `max_spring_torque_nm`: 5, 5, 5, 4, 2.5, 2.5, 1.5 Nm |
+| `LBRServer` of lbr_fri_ros2_stack | 200 on every joint | a fifth of that on A1 to A3 and two fifths on A4 to A7: 1, 1, 1, 1.6, 1, 1, 0.6 Nm |
 
-The default `sunrise_joint_stiffness` is that of `FRITorqueDriver`. An application that is softer than the
-parameter gets a weaker spring: the safe side. A parameter below the application's stiffness is the unsafe
-side: the spring exceeds `max_spring_torque_nm` by the ratio of the two, five times with a parameter of 200
-under `FRITorqueDriver`'s 1000. No preset of
-[`LBRServerJointImpedance`](sunrise_setup.md#second-app-lbrserverjointimpedance-stiffness-and-damping-presets)
-is stiffer than the default parameter.
+The default `sunrise_joint_stiffness` is that of `FRITorqueDriver`. With a parameter of 200 under its 1000
+the spring would pull with five times `max_spring_torque_nm`.
 
 The parameter is set in `config/controllers.yaml`. At REST it can also be set on the running stack, and
 holds until the stack is launched again:
@@ -49,18 +49,15 @@ pixi run -e jazzy ros2 param set /lbr/fri_position_passthrough_controller sunris
 ## Parameters
 
 All are parameters of `fri_position_passthrough_controller`. They are read when the controller is
-configured and again at every activation, so a change takes effect at the next arm (REST to ARMED), and
-every activation logs what it took.
+configured and again at every activation, so a change takes effect at the next arm (REST to ARMED). An
+activation logs the frames, the topic, the filter, the timeout, the damping, the nullspace gain and the
+margin it took; the three per-joint parameters are read with `ros2 param get`.
 
 A value that fails validation fails the activation, and the switch from REST with it. The controller
 manager has deactivated `joint_trajectory_controller` and `zero_effort_controller` by then and does not
 activate them again: no controller owns the position or the torque command, and `crisp_session.py` refuses
-to switch. Back to REST by hand, after the value is put right:
-
-```bash
-pixi run -e jazzy ros2 control switch_controllers -c /lbr/controller_manager --strict \
-  --activate joint_trajectory_controller zero_effort_controller
-```
+to switch. After the value is put right, REST comes back by the strict switch by hand of
+[the README](../README.md#bringing-up-the-real-arm), step 7.
 
 | Parameter | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -74,7 +71,7 @@ pixi run -e jazzy ros2 control switch_controllers -c /lbr/controller_manager --s
 | `nullspace_gain` | double | `0.05` | Pull of q_ik toward the posture at activation per update, in the nullspace of the Jacobian. |
 | `joint_limit_margin_rad` | double | `0.05` | q_ik stays this far inside the description's position limits. A margin that leaves no range fails the activation. |
 | `max_joint_step_rad` | double[7] | `0.004` each | Limit on the change of the output per update: 2 rad/s at 500 Hz. It gives way to the gap clamp. |
-| `sunrise_joint_stiffness` | double[7] | `1000, 1000, 1000, 500, 500, 500, 500` | The stiffness of the Sunrise application that runs, and never below it. See above. |
+| `sunrise_joint_stiffness` | double[7] | `1000, 1000, 1000, 500, 500, 500, 500` | The stiffness of the Sunrise application that runs. See above. |
 | `max_spring_torque_nm` | double[7] | `5, 5, 5, 4, 2.5, 2.5, 1.5` | Per joint, the output stays within `max_spring_torque_nm / sunrise_joint_stiffness` of the measured position: 0.005 rad on A1 to A3, 0.008 on A4, 0.005 on A5 and A6, 0.003 on A7. |
 
 The defaults are also the values of `config/controllers.yaml`.
@@ -104,8 +101,7 @@ A joint whose position state is not finite keeps its last finite value, and the 
 At activation `q_out`, `q_ik` and the posture are the measured position, and the filtered target and the
 target buffer are cleared: a target published before the activation is never used. Arm with the arm near
 the home: the IK starts where the arm is, but far from the home its joints drift away from the arm's while
-it solves the target, and the consumer's arming check has refused an arming for that.
-`crisp_session.py --home` moves there.
+it solves the target. `crisp_session.py --home` moves there.
 
 At deactivation the measured position is written into the position command. ARMED to REST activates
 `joint_trajectory_controller` in the same switch, and it holds the command it finds. The last output can be
@@ -143,11 +139,13 @@ The state is there only while the cell is ARMED. On the mock the same commands t
 - lbr_fri_ros2's command guard checks position limits, measured velocity and torque. Nothing checks
   `|q_cmd - q|`. That gap times Sunrise's stiffness is a joint torque the robot applies on top of crisp's
   overlay. The gap clamp is the only bound on it, and it is software on this PC.
-- A Sunrise application with a higher stiffness multiplies that torque. Change `sunrise_joint_stiffness`
-  in the same step, and only after the review [`commissioning_protocol.md`](commissioning_protocol.md)
-  asks for.
-- Only `cartesian_impedance_controller` follows `/lbr/target_pose`. `kuka_crisp.safe_switch` refuses to arm
-  `joint_impedance_controller`, and to switch to it while ARMED. A strict switch by hand is not refused.
+- An application stiffer than `sunrise_joint_stiffness` multiplies that torque. A change of the
+  application's stiffness is a change of this bound: the parameter changes in the same step, at REST, and
+  the risk assessment is revisited first
+  ([`commissioning_protocol.md`](commissioning_protocol.md#fri-and-torque-control)).
+- The spring pulls toward the IK of `/lbr/target_pose`, so the passthrough belongs with the controller
+  that follows that topic. `kuka_crisp.safe_switch` arms `cartesian_impedance_controller` and nothing else.
+  A strict switch by hand that activates the passthrough with another torque controller is not refused.
 - The nullspace pull goes toward the posture at activation, while the arm's elbow is set by crisp's own
   nullspace term and by friction. A lasting difference larger than the gap shows as `gap_clamped` on A1
   and A3, or A5 and A7, while the pose error is small: a steady spring torque within the gap bound.

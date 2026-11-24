@@ -111,8 +111,8 @@ unmaster.
 ### What it costs
 
 - **The arm has no valid absolute position until it is recalibrated.** Nothing may run
-  against it in the meantime: no FRI session, no `LBRServer`, no `pixi run -e jazzy
-  hardware`.
+  against it in the meantime: no FRI session. `FRITorqueDriver` is stopped on the smartPAD, and
+  `pixi run -e jazzy hardware` is not launched.
 - Recalibration follows the KUKA procedure for this arm, with the correct equipment and
   an authorized user. Follow the Sunrise.OS 1.17 manual, not this file, for the actual
   steps.
@@ -191,8 +191,9 @@ Three legitimate routes:
    It buys AUT at the cost of every customer-defined monitoring function. See
    [Deactivating the customer PSM to reach AUT](#deactivating-the-customer-psm-to-reach-aut).
 3. **Reconfigure for collaborative operation.** Replace that row with Power and Force
-   Limiting monitoring so the arm is provably safe to be near without a fence. See
-   [Reconfiguring for collaborative (PFL) operation](#reconfiguring-for-collaborative-pfl-operation).
+   Limiting monitoring (ISO/TS 15066), so the arm is provably safe to be near without a fence.
+   The cell has no such configuration. Its limit values are measured on the cell, with the
+   actual tool and payload at the actual speeds, and are not copied from any document.
 
 **Never bridge or jumper the operator-safety input.** It tells the cabinet a guard is
 closed when nothing is guarding anything, in the one mode where nothing is holding a
@@ -235,6 +236,14 @@ AUT, keep the smartPAD in reach, and keep people out of the reachable workspace 
 the robot is enabled. This is a commissioning configuration for an empty cell, not a
 configuration to run collaborative work under.
 
+### Capture the baseline before opening the editor
+
+- Safety checksum from `Safety` -> `Status`
+- Screenshots of every row of the current PSM and ESM tables
+- An archived untouched copy of the Sunrise project outside `%USERPROFILE%\SunriseWorkspace`
+  (`sunrise_setup.md` step 2 asks for this already; confirm it exists)
+- Installed option packages from `StationSetup.cat` -> `Software`
+
 ### Procedure
 
 1. Capture the baseline first, per
@@ -263,115 +272,52 @@ archived untouched project copy instead of trying to reconstruct rows by hand.
 
 ### What this does not buy
 
-- **Not unattended startup.** `LBRServer.java`'s four modal dialogs still run in AUT.
-  See [Unattended startup needs more than AUT](#unattended-startup-needs-more-than-aut).
-- **Not a collaborative cell.** No force or velocity limit has been measured or
+- **Not a step at the smartPAD before every start.** `FRITorqueDriver` has no dialogs and
+  opens FRI sessions by itself ([`sunrise_setup.md`](sunrise_setup.md#starting-it)). In AUT, with
+  the application running, a launch of `pixi run -e jazzy hardware` on the PC puts the arm under
+  FRI, and arming it is one more command there.
+- **Not a collaborative cell.** No force, pressure or velocity limit has been measured or
   configured. Tuning CRISP gains still belongs in T1, where releasing the enabling
   switch stops the arm.
 
-## Reconfiguring for collaborative (PFL) operation
+## FRI and torque control
 
-**The cell has no PFL configuration.** No force, pressure or velocity limit has been
-measured or configured, and nothing below is a validated limit value. The cell runs with
-the customer PSM table deactivated, which provides none of what follows.
+What holds for this stack in every operating mode.
 
-It takes four pieces of work, and only the third happens in Sunrise Workbench.
-
-### 1. Risk assessment
-
-Redo the cell risk assessment first. Changing the safety configuration invalidates
-whatever assessment currently covers this cell. Identify which body regions are
-reachable, at what speeds, with what tool geometry. Sharp or pinching tool features
-frequently dominate the outcome and can force a mechanical change before any
-configuration exists.
-
-### 2. Choose the collaborative mode
-
-ISO 10218 and ISO/TS 15066 define four. This section is about Power and Force Limiting.
-Speed and separation monitoring is worth considering if area scanners are available.
-
-### 3. Configure in Sunrise
-
-Reactivate the customer PSM table and populate it with PFL monitoring rows in place of
-the operator-safety row. The relevant AMFs are named approximately as below; read the
-actual list in the 1.17 safety editor, the naming drifts between versions:
-
-- Cartesian velocity monitoring (TCP speed), the primary PFL lever since contact
-  energy scales with it
-- Axis-specific velocity monitoring
-- Axis torque monitoring / external force monitoring
-- Cartesian workspace monitoring and axis range monitoring
-- Standstill monitoring
-
-Reactions available per row: Stop 0 (category 0, drives off immediately), Stop 1
-(braking ramp then drives off), Stop 1 path-maintaining, Stop 2. Prefer
-path-maintaining or Stop 1 over Stop 0 for collaborative work; a category 0 stop on a
-compliant arm holding a load carries its own hazards.
-
-Requires safety rights (`Safety` -> `Activation`, `Safety maintenance technician`).
-
-### 4. Validate by measurement, then sign off
-
-**Limit values are measured, not derived.** ISO/TS 15066 requires that configured
-force and pressure limits are validated against biomechanical limits for each
-contactable body region, using a force/pressure measuring device, with the actual
-tool and payload at the actual speeds. Do not copy limit values from any document,
-including this one.
-
-Then: sign-off by an authorized safety commissioner, record the new safety checksum,
-and update the cell documentation.
-
-### Capture the baseline before opening the editor
-
-- Safety checksum from `Safety` -> `Status`
-- Screenshots of every row of the current PSM and ESM tables
-- An archived untouched copy of the Sunrise project outside `%USERPROFILE%\SunriseWorkspace`
-  (`sunrise_setup.md` step 2 asks for this already; confirm it exists)
-- Installed option packages from `StationSetup.cat` -> `Software`
-
-### How this interacts with FRI and CRISP
-
-- **CRISP will trip the safety monitoring repeatedly during tuning.** A wrong gain
-  accelerates the arm and velocity monitoring fires. That is the system working. It is
-  also why gains are tuned in T1 first, never in AUT.
+- **Gains are tuned in T1 first, never in AUT.** A wrong gain accelerates the arm. In T1 the
+  reduced velocity is monitored and releasing the enabling switch stops the arm.
 - **The ROS-side guards are not protective devices.** `external_torque_limit: 2.0` with
   `external_torque_safety_check: true` in `lbr_system_config.yaml`, and LBR-Stack's
   `safe_stop` command guard, are software on a general-purpose Linux box speaking UDP.
   They are useful. They are not safety-rated and must never be credited as a mitigation
   in the risk assessment.
-- **The 200 Nm/rad Sunrise joint stiffness helps.** The arm is compliant, which is
-  friendly to force limits. Lowering that stiffness toward zero
-  ([`sunrise_setup.md`](sunrise_setup.md#sunrise-joint-stiffness)) would leave the arm held
-  only by ROS-side torque commands. That materially changes the safety picture and
-  requires the risk assessment to be revisited. Do not treat it as a tuning tweak.
-- **The position command while ARMED and a stiffer Sunrise app change the picture too**
+- **Sunrise's joint stiffness is part of the safety picture.** `FRITorqueDriver` runs 1000 Nm/rad
+  on A1 to A3 and 500 on A4 to A7 ([`sunrise_setup.md`](sunrise_setup.md#sunrise-joint-stiffness)).
+  Lowering it toward zero would leave the arm held only by ROS-side torque commands. A change of
+  the stiffness in either direction materially changes the safety picture and requires the risk
+  assessment to be revisited. Do not treat it as a tuning tweak.
+- **The position command while ARMED is part of it too**
   ([`position_source.md`](position_source.md)). While ARMED the position command is the IK of
   crisp's target and leads the arm, and the gap times Sunrise's stiffness is a joint torque the
   robot applies on top of crisp's overlay. Nothing in lbr_fri_ros2's command guard checks that
   gap; the passthrough's own gap clamp (`max_spring_torque_nm / sunrise_joint_stiffness` per
-  joint) is the guard, and it is ROS-side software like the guards above. Raising Sunrise's
-  stiffness (`LBRServerJointImpedance`'s presets above 200 Nm/rad) is a stiffness change in the
-  same sense as lowering it: it needs the same revisit of the risk assessment before it runs,
-  and `sunrise_joint_stiffness` must not be below it. Raising `max_spring_torque_nm` or
-  `max_joint_step_rad` above the defaults, or lowering `sunrise_joint_stiffness`, is a limit
-  change, not a tuning step. Nothing in this repo refuses one.
+  joint) is the guard, and it is ROS-side software like the guards above. Raising
+  `max_spring_torque_nm` or `max_joint_step_rad` above the defaults, or setting
+  `sunrise_joint_stiffness` below the stiffness of the application that runs
+  ([the rule](position_source.md#the-sunrise-application-and-sunrise_joint_stiffness)), is a
+  limit change, not a tuning step. Nothing in this repo refuses one.
 - **Every safety stop ends the FRI session** and needs a relaunch of
-  `pixi run -e jazzy hardware` plus the four smartPAD dialogs.
-
-### Unattended startup needs more than AUT
-
-`LBRServer.java` runs four modal dialogs before opening the FRI session, and they still
-appear in AUT. AUT alone does not give unattended startup. For that, hardcode the
-values in `LBRServer.java` (send period `2`, the FRI client address,
-`JOINT_IMPEDANCE_CONTROL`, `TORQUE`) and wrap the session in a retry loop so it
-reconnects after a drop instead of exiting.
+  `pixi run -e jazzy hardware`. `FRITorqueDriver` asks nothing for it: while it runs, it opens
+  the next session by itself.
 
 ## Before FRI starts
 
-The Windows-side installation of `LBRServer` is a prerequisite and is documented
+The Windows-side installation of `FRITorqueDriver` is a prerequisite and is documented
 separately in [`sunrise_setup.md`](sunrise_setup.md).
 
-Do not start `LBRServer` or `pixi run -e jazzy hardware` until all of these are true:
+Do not start `FRITorqueDriver` or `pixi run -e jazzy hardware` until all of these are true. With
+`FRITorqueDriver` left running, the launch of `hardware` alone opens the FRI session: the list is
+gone through before every launch.
 
 - Position-reference warning is cleared for A1-A7.
 - Sunrise.OS and Sunrise.FRI versions are recorded and the client SDK matches.
@@ -384,11 +330,13 @@ Do not start `LBRServer` or `pixi run -e jazzy hardware` until all of these are 
   the MAC recorded for the cabinet.
 - The robot is in T1 for the first commissioning tests.
 - The workspace is clear and the E-stop is available.
-- `LBRServer` is configured for the ROS workstation's address on the robot subnet,
-  a 2 ms send period, `JOINT_IMPEDANCE_CONTROL`, and `TORQUE` client command mode.
+- The application on the cabinet is `FRITorqueDriver`, and its client address is the ROS
+  workstation's on the robot subnet.
+- `sunrise_joint_stiffness` in `config/controllers.yaml` is the stiffness of the application that
+  runs ([the rule](position_source.md#the-sunrise-application-and-sunrise_joint_stiffness)).
 
 The stack must come up at REST: `joint_trajectory_controller` and `zero_effort_controller`
-active, `fri_position_passthrough_controller` and both crisp torque controllers inactive.
+active, `fri_position_passthrough_controller` and `cartesian_impedance_controller` inactive.
 
 ## Moving to the home configuration
 
@@ -401,9 +349,9 @@ is 0 at the all-zero pose, which is singular. The number is `HOME_DEGREES` in
 
 The arm is moved by commanding **positions**, not torques. `joint_trajectory_controller`
 holds the position command interfaces at REST and runs the move; FRI passes the commanded
-positions to Sunrise's joint impedance controller at the 200 Nm/rad stiffness `LBRServer`
-sets, and `zero_effort_controller` supplies the zero torque overlay throughout. Nothing in
-this workspace commands a torque during a home move.
+positions to Sunrise's joint impedance controller at the stiffness `FRITorqueDriver` sets, 1000
+Nm/rad on A1 to A3 and 500 on A4 to A7, and `zero_effort_controller` supplies the zero torque
+overlay throughout. Nothing in this workspace commands a torque during a home move.
 
 `joint_trajectory_controller` and `fri_position_passthrough_controller` claim the same
 position command interfaces, so only one of them is active. `move_to_home()` in
@@ -426,10 +374,9 @@ pixi run -e jazzy python scripts/crisp_session.py --home
 
 It refuses:
 
-- when neither `joint_trajectory_controller` nor `fri_position_passthrough_controller` is
-  active, or `zero_effort_controller` is not;
-- `move_to_home()` called with a crisp torque controller active (`crisp_session.py --home`
-  goes to REST first);
+- `move_to_home()` when the cell is not at REST. `crisp_session.py --home` goes to REST first,
+  by one strict switch, and refuses when neither `joint_trajectory_controller` nor
+  `fri_position_passthrough_controller` is active;
 - a target angle outside the position limits of the robot description, `[169, 119, 169,
   119, 169, 119, 174]` degrees, so that it is refused here and not by the FRI command
   guard, which ends the session.
@@ -442,5 +389,4 @@ the session.
 ### Releasing the enabling switch mid-move
 
 It drops `COMMANDING_ACTIVE`, which ends the FRI session and every controller on it, and
-needs a relaunch of `pixi run -e jazzy hardware` plus the four smartPAD dialogs. Plan the
-move as one continuous hold.
+needs a relaunch of `pixi run -e jazzy hardware`. Plan the move as one continuous hold.

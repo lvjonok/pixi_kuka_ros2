@@ -1,8 +1,8 @@
 # Sunrise controller setup for FRI
 
-Windows-side procedure for installing the `LBRServer` FRI application on the
-cabinet. Complete this before any step in
-[`commissioning_protocol.md`](commissioning_protocol.md).
+Windows-side procedure for installing the FRI application
+[`sunrise/FRITorqueDriver.java`](../sunrise/FRITorqueDriver.java) on the cabinet. Complete this before
+any step in [`commissioning_protocol.md`](commissioning_protocol.md).
 
 ## Versions to match
 
@@ -29,8 +29,8 @@ What this workspace needs, whatever the addresses turn out to be:
 
 - The ROS workstation must have an address on the **same subnet as X66**, on the
   interface cabled to it.
-- That address must be one of the two in `client_names_` in `LBRServer.java`, or
-  you edit that array. Stock values are `172.31.1.148` and `192.170.10.1`.
+- That address must be the client address in `FRITorqueDriver.java`, `172.31.1.148`, or you edit
+  `_clientName` there.
 - The cabinet needs **no gateway and no internet route**. Sunrise.OS is not
   hardened for exposure to a general network, and nothing here requires the
   controller to reach anything but the ROS workstation.
@@ -59,12 +59,7 @@ nmcli con up "<connection-name>"
 
 Keeping the cabinet on its factory address avoids a `StationSetup.cat` install,
 and therefore a reboot and a re-verification of the safety configuration and the
-A1-A7 referencing. It also means `LBRServer.java` runs unmodified.
-
-For a second robot later, change the *new* cabinet during its own commissioning
-rather than moving this one. Two robots on one ROS host also need distinct FRI
-ports, distinct ROS namespaces, and distinct `robot_name` frame prefixes, and
-stock `LBRServer.java` exposes no port selector.
+A1-A7 referencing. It also means `FRITorqueDriver.java` needs no edit.
 
 ### Record the MAC, not just the address
 
@@ -79,7 +74,7 @@ of a Sunrise controller returns `139/netbios-ssn`, `445/microsoft-ds`, and
 the Linux hosts on a lab subnet even if the MAC is unknown.
 
 `30200/tcp` reads as closed and that is correct: FRI is UDP, and the port only
-listens while `LBRServer` is running on the smartPAD.
+listens while an FRI application is running on the smartPAD.
 
 ### Read the address, do not infer it
 
@@ -179,21 +174,13 @@ cabinet WorkVisual is the fieldbus and I/O editor that Workbench launches for
 `IOConfiguration.wvs`. It cannot create a Sunrise project, edit `StationSetup.cat`,
 install option packages, or synchronize Java applications.
 
-## Two corrections to the upstream guide
+## The upstream guide
 
 LBR-Stack's
 [hardware setup guide](https://lbr-stack.readthedocs.io/en/latest/lbr_fri_ros2_stack/lbr_fri_ros2_stack/doc/hardware_setup.html)
-is otherwise accurate, but two of its steps do not apply here.
-
-1. **`LBRServer.java` is not on the branch the guide tells you to clone.** The guide
-   clones `fri-$FRI_CLIENT_VERSION`. In the 1.x line, `server_app/LBRServer.java`
-   exists only on the `ros2-fri-1.15` branch of `lbr-stack/fri`; branches `fri-1.11`
-   through `fri-1.17` contain the C++ client SDK and no `server_app/` directory.
-   Take the Java file from `ros2-fri-1.15` regardless of the FRI version in use. The
-   Sunrise FRI Java API is unchanged across these minor versions.
-2. **The guide assumes a fresh project.** This cabinet already carries a project with
-   a valid safety configuration and referencing state. Load that project from the
-   controller instead of creating a new one.
+covers the installation of FRI on the cabinet. It assumes a fresh project. This cabinet already
+carries a project with a valid safety configuration and referencing state: load that project from
+the controller instead of creating a new one.
 
 ## Procedure
 
@@ -210,11 +197,11 @@ is otherwise accurate, but two of its steps do not apply here.
    `StationSetup.cat` -> `Software`.
 
    Installing FRI must not change the checksum. A deliberate safety configuration
-   change does, and this cell has had one: the customer PSM table is deactivated so
-   that AUT can be selected. Record the checksum from *after* that change as the
-   baseline the later steps compare against, and see
+   change does. On this cell the customer PSM table is deactivated so that AUT can be
+   selected: the checksum of that configuration is the baseline the later steps compare
+   against, and
    [`commissioning_protocol.md`](commissioning_protocol.md#deactivating-the-customer-psm-to-reach-aut)
-   for what that change removed.
+   says what that configuration leaves out.
 
 4. Determine whether FRI is already installed. If the smartPAD application list
    contains `LBRJointSineOverlay`, `LBRTorqueSineOverlay`, and
@@ -228,149 +215,87 @@ is otherwise accurate, but two of its steps do not apply here.
    step 3 afterwards, and re-check that the A1-A7 position-reference warning is
    still cleared.
 
-6. Create the application package: right-click `src` -> `New` -> `Package`, named
-   exactly `lbr_fri_ros2`. The name must match `package lbr_fri_ros2;` on line 1 of
-   `LBRServer.java` or the project will not build.
+6. If the project has no package `lbr_fri_ros2`, create it: right-click `src` -> `New` ->
+   `Package`, named exactly `lbr_fri_ros2`. The name must match `package lbr_fri_ros2;` in
+   `FRITorqueDriver.java` or the project will not build.
 
-7. Copy in the server application:
+7. Copy [`sunrise/FRITorqueDriver.java`](../sunrise/FRITorqueDriver.java) of this repo into
+   `src\lbr_fri_ros2\` of the project. No edit to the file is required: its client is
+   `172.31.1.148`, the address the ROS workstation holds on the robot subnet, on port `30200`. If
+   your workstation uses a different address, `_clientName` is what must be edited.
 
-   ```powershell
-   git clone https://github.com/lbr-stack/fri.git -b ros2-fri-1.15 $HOME\Downloads\fri
-   copy $HOME\Downloads\fri\server_app\LBRServer.java $HOME\SunriseWorkspace\<project>\src\lbr_fri_ros2\
-   ```
+8. Refresh `src` in Workbench, confirm `FRITorqueDriver` compiles, and **synchronize
+   applications**. Nothing else: no `StationSetup.cat` install, no option package, no safety
+   configuration edit, no reboot. `FRITorqueDriver` should now appear in the smartPAD
+   application list.
 
-   No edit to the file is required. `LBRServer.java` hardcodes
-   `client_names_ = {"172.31.1.148", "192.170.10.1"}`, and `172.31.1.148` is the
-   address the ROS workstation holds on the robot subnet. If your workstation uses
-   a different address, that array is what must be edited.
-
-8. Refresh `src` in Workbench, confirm `LBRServer` compiles, and synchronize
-   applications. `LBRServer` should now appear in the smartPAD application list.
+9. Read the safety checksum on the smartPAD again. It must equal step 3's. If it does not, stop
+   and restore the archived project; do not run the application.
 
 Running applications from the smartPAD may require `Safety maintenance technician`
 rights, activated under `Safety` -> `Activation`.
 
-## Startup order
+**Do not copy Drake's provisioning.** `FRITorqueDriver.java` is derived from drake-iiwa-driver,
+whose README presses `Install` in `StationSetup.cat` (which wipes and reboots the cabinet) and
+unchecks External EMERGENCY STOP, Operator Protection and Safety Stop in the Customer PSM. None of
+that is needed for this application and none of it may be done on this cell: the application goes
+in by the sync above.
 
-`LBRServer.initialize()` runs four modal dialogs and then calls
-`fri_session_.await(10, TimeUnit.SECONDS)`. This is a **10 second window**, not an
-indefinite wait: on timeout the application logs the error and returns.
+## Starting it
 
-Start the ROS side first, then answer the dialogs:
+`FRITorqueDriver` asks nothing: it has no dialogs. Its values are in the file: client
+`172.31.1.148` on port `30200`, send period 2 ms, the `TORQUE` client command mode.
+
+Select `FRITorqueDriver` in the smartPAD application list and start it. It opens an FRI session
+and waits for the client, an hour at a time (`friSession.await(3600, TimeUnit.SECONDS)`); on a
+timeout it closes the session and opens the next, so it waits for as long as it runs. The ROS
+side may be started before or after it:
 
 ```bash
 pixi run -e jazzy hardware
 ```
 
-Dialog answers for this workspace:
+With the client connected it holds position under its joint impedance with the FRI torque
+overlay. When that motion returns, the session is closed and the loop in `run()` opens the next
+one:
 
-| Dialog | Answer |
-| --- | --- |
-| FRI send period [ms] | `2` |
-| Remote IP address | `172.31.1.148` |
-| FRI control mode | `JOINT_IMPEDANCE_CONTROL` |
-| FRI client command mode | `TORQUE` |
+- A restart of `hardware` brings the FRI session back with nobody at the smartPAD. With the
+  application left running, a launch on the PC is all it takes to put the arm under FRI: the
+  list [before FRI starts](commissioning_protocol.md#before-fri-starts) is gone through before
+  every launch.
+- The application has no end of its own. It runs until it is stopped on the smartPAD.
 
 ## Sunrise joint stiffness
 
-`LBRServer.java` hardcodes `new JointImpedanceControlMode(200, 200, 200, 200, 200,
-200, 200)`, that is 200 Nm/rad on every axis. In `TORQUE` client command mode the torque
-overlay is added on top of that impedance law, around the position FRI carries. At REST
-that position is fixed and the spring holds the arm. ARMED it is the IK of crisp's target,
-held within a bounded gap of the arm, and the spring pulls toward the target with a bounded
-torque ([`position_source.md`](position_source.md)).
+`FRITorqueDriver.java` runs `new JointImpedanceControlMode(1000, 1000, 1000, 500, 500, 500, 500)`
+with `setDampingForAllJoints(1.0)`: 1000 Nm/rad on A1 to A3, 500 on A4 to A7, damping 1.0. In
+`TORQUE` client command mode the torque overlay is added on top of that impedance law, around the
+position FRI carries. At REST that position is fixed and the spring holds the arm. ARMED it is
+the IK of crisp's target, held within a bounded gap of the arm, and the spring pulls toward the
+target with a bounded torque ([`position_source.md`](position_source.md)).
+
+FRI does not report the stiffness. `sunrise_joint_stiffness` of
+`fri_position_passthrough_controller` is written for this application, and the rule for it is in
+[`position_source.md`](position_source.md#the-sunrise-application-and-sunrise_joint_stiffness).
+The damping is not a parameter of the stack: it is set in the Java file only.
 
 Lowering the stiffness toward zero means the arm is held only by the ROS-side torque
 commands, which is a separate commissioning decision with its own safety review, not a
 tuning tweak.
 
-## Second app: `LBRServerJointImpedance` (stiffness and damping presets)
+Checked on the arm, 2026-10-25, at REST: the external torque Sunrise estimates is 1000 Nm/rad on
+A1 to A3 and 500 on A4 to A7 times the distance of the joint from its commanded position.
 
-[`sunrise/LBRServerJointImpedance.java`](../sunrise/LBRServerJointImpedance.java) is
-`LBRServer` with the control mode fixed to `JOINT_IMPEDANCE_CONTROL` and the command mode to
-`TORQUE`, plus a stiffness and a damping preset dialog. It is installed **beside**
-`LBRServer`, which stays as it is and remains the app to run unless a test calls for another
-preset. The file has **not been compiled**: there is no Sunrise SDK on
-Linux, so the first build is the Workbench one below.
+## The other file in `sunrise/`
 
-### Install: sync applications only
-
-1. Load the project from the cabinet and archive an untouched copy, as in steps 1-2 of the
-   [Procedure](#procedure). Record the safety configuration checksum (step 3).
-2. Open the retrieved `src/lbr_fri_ros2/LBRServer.java` and read its
-   `JointImpedanceControlMode(...)` line and any `setDampingForAllJoints(...)` call. The first
-   entry of each preset dialog must be exactly that. The file has 200 Nm/rad on every joint
-   and damping 0.3, and the 0.3 was not read from the cabinet. If the cabinet's copy differs,
-   edit the first entries of `stiffness_presets_` / `damping_presets_` (and their labels) to
-   match it before going on. **No `setDampingForAllJoints(...)` call means damping 0.7**,
-   KUKA's default for a `JointImpedanceControlMode` (the stock lbr-stack `ros2-fri-1.15`
-   `LBRServer.java` has none): then make the first damping preset `0.7` labelled
-   `0.7 (today)`, keep `0.3` as a separate option, and drop the duplicate
-   `0.7 (KUKA default)` entry.
-3. Copy `LBRServerJointImpedance.java` into `src/lbr_fri_ros2/` next to `LBRServer.java`. The
-   package already exists from the `LBRServer` install; the file's first line is
-   `package lbr_fri_ros2;`.
-4. Refresh `src`, confirm both applications compile, and **synchronize applications**. Nothing
-   else: no `StationSetup.cat` install, no option package, no safety configuration edit, no
-   reboot.
-5. Read the safety checksum on the smartPAD again. It must equal step 1's. If it does not,
-   stop and restore the archived project; do not run the app.
-
-**Do not copy Drake's provisioning.** drake-iiwa-driver's README presses `Install` in
-`StationSetup.cat` (which wipes and reboots the cabinet) and unchecks External EMERGENCY STOP,
-Operator Protection and Safety Stop in the Customer PSM. None of that is needed for this app and
-none of it may be done on this cell: the app uses only API calls `LBRServer` and Drake's torque
-driver already make, and goes in by the sync above.
-
-### Run it
-
-Choose `LBRServerJointImpedance` in the smartPAD application list instead of `LBRServer`. The
-[Startup order](#startup-order) is the same (ROS side first, then a 10 second window after the
-last dialog). Four dialogs:
-
-| Dialog | Answer | Options |
-| --- | --- | --- |
-| FRI send period [ms] | `2` | as `LBRServer` |
-| Remote IP address | `172.31.1.148` | as `LBRServer` |
-| Joint impedance stiffness | `200 all (today)` unless the test says otherwise | `200 all (today)`, `500 all`, `1000 A1-A3, 500 A4-A7 (Drake)` |
-| Joint impedance damping | `0.3 (today)` unless the test says otherwise | `0.3 (today)`, `0.7 (KUKA default)`, `1.0 (Drake)` |
-
-The first option of each dialog is what `LBRServer` runs. The app logs every answer and,
-before holding position, the stiffness array, damping and command mode it runs with; read the
-smartPAD log to confirm them.
-
-### The stiffness rule
-
-**`sunrise_joint_stiffness` of `fri_position_passthrough_controller` must equal the preset the
-app is running.** FRI does not report the stiffness, so the controller cannot read it; it takes
-the parameter on trust and computes its gap clamp from it,
-`|q_cmd - q| <= max_spring_torque_nm / sunrise_joint_stiffness`. A parameter of 200 while the
-app runs at 1000 lets through five times the intended spring torque; a parameter above the
-app's stiffness gives a weaker spring. `config/controllers.yaml` has 1000 on A1 to A3 and 500
-on A4 to A7, which no preset exceeds. So:
-
-- Change the preset and the parameter in the same step, with the controller at REST; the
-  parameter takes effect at the next activation
-  ([`position_source.md`](position_source.md#the-sunrise-application-and-sunrise_joint_stiffness)).
-- Write the running preset (stiffness and damping) into the session's notes; damping is not a
-  controller parameter and appears nowhere else.
-- Any preset above 200 only after the safety review
-  [`commissioning_protocol.md`](commissioning_protocol.md) requires, and only after the
-  passthrough has been checked on the arm at 200
-  ([`position_source.md`](position_source.md)).
-
-## Third app: `FRITorqueDriver`
-
-[`sunrise/FRITorqueDriver.java`](../sunrise/FRITorqueDriver.java) is a torque-overlay application
-with fixed values and no dialogs: client `172.31.1.148` on port 30200, send period 2 ms, joint
-impedance 1000/1000/1000/500/500/500/500 Nm/rad with damping 1.0. It has not been compiled
-either, and goes in by the same sync. With it running, `sunrise_joint_stiffness` must be those
-seven numbers, and [the stiffness rule](#the-stiffness-rule) holds.
+[`sunrise/LBRServerJointImpedance.java`](../sunrise/LBRServerJointImpedance.java) is a variant of
+lbr_fri_ros2_stack's `LBRServer` that asks for a stiffness and a damping preset in two more
+dialogs. It has not been compiled, and nothing here is written for it.
 
 ## Network caveat
 
 A 2 ms FRI send period on a switch shared with general lab traffic is exposed to
-jitter, and FRI drops the session on connection-quality degradation. If `LBRServer`
-logs quality, jitter, or latency warnings, the fix is a dedicated link — a second NIC
-or USB-Ethernet adapter in the workstation, cabled directly to X66 — not a longer
-send period.
+jitter, and FRI drops the session on connection-quality degradation. `FRITorqueDriver` does not
+log the connection quality: a dropped session shows on the ROS side, where the driver logs
+`LBR left COMMANDING_ACTIVE` and closes its FRI client. The fix is a dedicated link (a second NIC
+or USB-Ethernet adapter in the workstation, cabled directly to X66), not a longer send period.
