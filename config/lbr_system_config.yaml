@@ -4,8 +4,8 @@ fri_client_sdk:
   major_version: 1
   minor_version: 17
 
-# CRISP writes joint torque overlays: LBRServer on the smartPAD must run the TORQUE client
-# command mode with JOINT_IMPEDANCE_CONTROL.
+# CRISP writes joint torque overlays: the Sunrise application must run the TORQUE client command
+# mode under a joint impedance control mode, as sunrise/FRITorqueDriver.java does.
 client_command_mode: torque
 port_id: 30200
 remote_host: INADDR_ANY
@@ -18,8 +18,8 @@ command_guard:
 
 state_guard:
   # lbr_fri_ros2 checks this once, when FRI starts commanding. A tool passes only with its load
-  # declared in Sunrise and attached in LBRServer: declare the load, do not raise the limit.
-  # The flag is ignored upstream; only the limit acts.
+  # declared in Sunrise: declare the load, do not raise the limit. The flag is ignored upstream;
+  # only the limit acts.
   external_torque_safety_check: true
   external_torque_limit: 2.0
 

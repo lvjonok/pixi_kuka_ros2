@@ -28,7 +28,6 @@ struct PositionSourceParams {
   double ik_damping = 0.01;
   double nullspace_gain = 0.05;
   double joint_limit_margin_rad = 0.05;
-  // One entry per joint.
   std::vector<double> max_joint_step_rad = std::vector<double>(7, 0.004);
   std::vector<double> sunrise_joint_stiffness = {1000.0, 1000.0, 1000.0, 500.0,
                                                  500.0,  500.0,  500.0};
@@ -78,7 +77,6 @@ class PositionSource {
   const Eigen::VectorXd &q_ik() const { return q_ik_; }
   const Eigen::VectorXd &gap_clamped() const { return gap_clamped_; }
   const Eigen::VectorXd &step_clamped() const { return step_clamped_; }
-  const Eigen::VectorXd &gap() const { return gap_; }
   // The output is the measured position: no target yet, a stale one, or an invalid input.
   bool stale() const { return stale_; }
   std::uint32_t events() const { return events_; }
@@ -104,7 +102,6 @@ class PositionSource {
   std::vector<int> idx_q_;
   std::vector<int> idx_v_;
   pinocchio::FrameIndex ee_frame_id_ = 0;
-  pinocchio::SE3 world_from_base_ = pinocchio::SE3::Identity();
   Eigen::VectorXd q_lower_;  // URDF limits minus the margin, controller order
   Eigen::VectorXd q_upper_;
 

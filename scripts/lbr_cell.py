@@ -1,4 +1,4 @@
-"""The iiwa cell as this repo's stack runs it: names, REST and ARMED, the switch, joint limits."""
+"""The iiwa cell as this repo's stack runs it: names, REST and ARMED, the switch, its topics."""
 
 import threading
 import time
@@ -24,12 +24,10 @@ PASSTHROUGH = "fri_position_passthrough_controller"
 TRAJECTORY = "joint_trajectory_controller"
 ZERO_EFFORT = "zero_effort_controller"
 CARTESIAN = "cartesian_impedance_controller"
-TORQUE_CONTROLLERS = (CARTESIAN, "joint_impedance_controller")
+TORQUE_CONTROLLERS = (CARTESIAN,)
 
-# REST: the trajectory controller holds a fixed position command and Sunrise's joint spring holds
-# the arm on it. ARMED: the passthrough's position command is the IK of the Cartesian target, so
-# the spring pulls toward the target with the Cartesian controller's torque. The passthrough with
-# zero effort does not hold the arm: the arm sags.
+# REST: Sunrise's joint spring holds the arm on the trajectory controller's position command.
+# ARMED: it pulls toward the IK of the target. The passthrough with zero effort holds nothing.
 REST = (TRAJECTORY, ZERO_EFFORT)
 ARMED = (PASSTHROUGH, CARTESIAN)
 
@@ -86,7 +84,7 @@ def controller_states(node: Node) -> dict[str, str]:
 
 
 def cell_state(states: dict[str, str]) -> str:
-    """REST, ARMED with its torque controllers, or what else holds the commands."""
+    """REST, ARMED with its torque controller, or what else holds the commands."""
     active = {name for name, state in states.items() if state == "active"}
     if set(REST) <= active and PASSTHROUGH not in active:
         return "REST"
@@ -113,22 +111,24 @@ def switch(node: Node, *, activate: Sequence[str], deactivate: Sequence[str]) ->
         )
 
 
-def joint_limits(node: Node) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """(lower, upper, velocity) of JOINTS, rad and rad/s, from the stack's robot_description."""
-    heard: list[str] = []
-    subscription = node.create_subscription(
-        String,
-        f"{NS}/robot_description",
-        lambda message: heard.append(message.data),
-        QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
-    )
+def one_message(node: Node, message_type: Any, topic: str, qos: QoSProfile) -> Any:
+    """The next message on a topic. Another thread spins the node."""
+    heard: list[Any] = []
+    subscription = node.create_subscription(message_type, topic, heard.append, qos)
     deadline = time.monotonic() + 10.0
     while not heard and time.monotonic() < deadline:
         time.sleep(0.05)
     node.destroy_subscription(subscription)
     if not heard:
-        raise RuntimeError(f"no {NS}/robot_description within 10 s: is the stack up?")
-    joints = ET.fromstring(heard[0]).findall("joint")
+        raise RuntimeError(f"no message on {topic} within 10 s: is the stack up?")
+    return heard[0]
+
+
+def joint_limits(node: Node) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(lower, upper, velocity) of JOINTS, rad and rad/s, from the stack's robot_description."""
+    latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+    urdf = one_message(node, String, f"{NS}/robot_description", latched).data
+    joints = ET.fromstring(urdf).findall("joint")
     limits = {joint.get("name"): joint.find("limit") for joint in joints}
     return tuple(
         np.array([float(limits[joint].get(key)) for joint in JOINTS])

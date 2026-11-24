@@ -22,13 +22,14 @@
 
   <exec_depend>controller_manager</exec_depend>
   <exec_depend>crisp_controllers</exec_depend>
-  <exec_depend>lbr_bringup</exec_depend>
   <exec_depend>iris_robots_description</exec_depend>
+  <exec_depend>lbr_iiwa14_r820_description</exec_depend>
   <exec_depend>lbr_ros2_control</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>xacro</exec_depend>
 
   <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>lbr_iiwa14_r820_description</test_depend>
   <test_depend>lbr_ros2_control</test_depend>
   <test_depend>xacro</test_depend>
 

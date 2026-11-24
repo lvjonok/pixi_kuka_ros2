@@ -1,5 +1,3 @@
-# ruff: noqa: I001
-
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import (
@@ -14,7 +12,7 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def _nodes(context) -> list:
-    namespace = LaunchConfiguration("namespace")
+    namespace = "lbr"
     mode = LaunchConfiguration("mode").perform(context)
     tool = LaunchConfiguration("tool").perform(context)
     hardware = mode == "hardware"
@@ -74,8 +72,8 @@ def _nodes(context) -> list:
     spawner = ["--controller-manager", "controller_manager"]
     fri_broadcasters = []
     if hardware:
-        # The hardware interface blocks until LBRServer's FRI heartbeat, and a spawner that gives
-        # up before it loads no controller: wait for the operator at the smartPAD.
+        # The hardware interface blocks until the Sunrise application's FRI heartbeat, and a
+        # spawner that gives up before it loads no controller.
         spawner += ["--controller-manager-timeout", "600", "--switch-timeout", "600"]
         fri_broadcasters = [
             "estimated_wrench_interface",
@@ -83,10 +81,6 @@ def _nodes(context) -> list:
             "force_torque_broadcaster",
         ]
 
-    # REST: the trajectory controller holds a fixed position command, and Sunrise's joint spring
-    # holds the arm on it. The passthrough's command stays within a small gap of the arm, so it
-    # would not hold it: it stays inactive until it comes in with a torque overlay, in one strict
-    # switch.
     active_controllers = Node(
         package="controller_manager",
         executable="spawner",
@@ -112,7 +106,6 @@ def _nodes(context) -> list:
             *spawner,
             "--inactive",
             "cartesian_impedance_controller",
-            "joint_impedance_controller",
             "fri_position_passthrough_controller",
         ],
     )
@@ -133,7 +126,6 @@ def _nodes(context) -> list:
 def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
-            DeclareLaunchArgument("namespace", default_value="lbr"),
             DeclareLaunchArgument(
                 "mode",
                 default_value="hardware",

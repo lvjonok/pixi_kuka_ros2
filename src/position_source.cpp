@@ -15,8 +15,8 @@ namespace pixi_kuka_ros2 {
 
 namespace {
 
-bool finite_and_at_least(double value, double minimum) {
-  return std::isfinite(value) && value >= minimum;
+bool finite_and_not_negative(double value) {
+  return std::isfinite(value) && value >= 0.0;
 }
 
 bool per_joint(const std::vector<double> &values, std::size_t joint_count, const char *name,
@@ -102,10 +102,6 @@ bool PositionSource::load_model(const std::string &urdf_xml,
 
 bool PositionSource::configure(std::size_t joint_count, const PositionSourceParams &params,
                                std::string *error) {
-  if (joint_count == 0) {
-    *error = "no joints.";
-    return false;
-  }
   if (!std::isfinite(params.target_filter) || params.target_filter < 0.0 ||
       params.target_filter >= 1.0) {
     *error = "target_filter must be in [0, 1).";
@@ -115,15 +111,15 @@ bool PositionSource::configure(std::size_t joint_count, const PositionSourcePara
     *error = "target_timeout_s must be finite and > 0.";
     return false;
   }
-  if (!finite_and_at_least(params.ik_damping, 0.0)) {
+  if (!finite_and_not_negative(params.ik_damping)) {
     *error = "ik_damping must be finite and >= 0.";
     return false;
   }
-  if (!finite_and_at_least(params.nullspace_gain, 0.0) || params.nullspace_gain > 1.0) {
+  if (!finite_and_not_negative(params.nullspace_gain) || params.nullspace_gain > 1.0) {
     *error = "nullspace_gain must be in [0, 1].";
     return false;
   }
-  if (!finite_and_at_least(params.joint_limit_margin_rad, 0.0)) {
+  if (!finite_and_not_negative(params.joint_limit_margin_rad)) {
     *error = "joint_limit_margin_rad must be finite and >= 0.";
     return false;
   }
@@ -153,10 +149,6 @@ bool PositionSource::configure(std::size_t joint_count, const PositionSourcePara
   kinematics_error_.clear();
   if (!model_loaded_) {
     kinematics_error_ = "no robot model (robot_description missing or unusable)";
-  } else if (static_cast<std::size_t>(model_.nv) != joint_count ||
-             idx_q_.size() != joint_count) {
-    kinematics_error_ = "the model has " + std::to_string(model_.nv) + " joints, the controller " +
-                        std::to_string(joint_count);
   } else if (!model_.existFrame(params.end_effector_frame)) {
     kinematics_error_ = "end_effector_frame '" + params.end_effector_frame + "' is not in the model";
   } else if (!model_.existFrame(params.base_frame)) {
@@ -166,7 +158,8 @@ bool PositionSource::configure(std::size_t joint_count, const PositionSourcePara
   } else {
     ee_frame_id_ = model_.getFrameId(params.end_effector_frame);
     // Fixed to the universe, so its placement is its pose in the model's world.
-    world_from_base_ = model_.frames[model_.getFrameId(params.base_frame)].placement;
+    const pinocchio::SE3 &world_from_base =
+        model_.frames[model_.getFrameId(params.base_frame)].placement;
     q_lower_.resize(n);
     q_upper_.resize(n);
     for (Eigen::Index index = 0; index < n && kinematics_error_.empty(); ++index) {
@@ -181,15 +174,15 @@ bool PositionSource::configure(std::size_t joint_count, const PositionSourcePara
       *error = kinematics_error_ + ".";
       return false;
     }
-    if (!world_from_base_.isIdentity(1e-9)) {
+    if (!world_from_base.isIdentity(1e-9)) {
       // crisp has no base_frame: it compares the raw target with the end effector's pose in the
       // model's world. Reading the target in an offset base_frame would chase another pose.
-      const Eigen::Vector3d &offset = world_from_base_.translation();
+      const Eigen::Vector3d &offset = world_from_base.translation();
       kinematics_error_ =
           "base_frame '" + params.base_frame + "' is not the model's world (offset [" +
           std::to_string(offset.x()) + ", " + std::to_string(offset.y()) + ", " +
           std::to_string(offset.z()) + "] m, rotated " +
-          std::to_string(Eigen::AngleAxisd(world_from_base_.rotation()).angle()) +
+          std::to_string(Eigen::AngleAxisd(world_from_base.rotation()).angle()) +
           " rad), but crisp reads the target in the world frame";
     } else {
       posture_pull_.setZero(model_.nv);
@@ -295,11 +288,9 @@ bool PositionSource::ik_step() {
   const pinocchio::SE3 &world_from_ee = data_.oMf[ee_frame_id_];
 
   // e = [p_target - p(q_ik); log3(R_target R(q_ik)^T)], in world (= base) axes.
-  error_.head<3>() = world_from_base_.rotation() * filtered_position_ +
-                     world_from_base_.translation() - world_from_ee.translation();
-  rotation_error_.noalias() = world_from_base_.rotation() *
-                              filtered_orientation_.toRotationMatrix() *
-                              world_from_ee.rotation().transpose();
+  error_.head<3>() = filtered_position_ - world_from_ee.translation();
+  rotation_error_.noalias() =
+      filtered_orientation_.toRotationMatrix() * world_from_ee.rotation().transpose();
   error_.tail<3>() = pinocchio::log3(rotation_error_);
 
   // dq = J^+ e + (I - J^+ J) k (q_posture - q_ik), J^+ = J^T (J J^T + lambda^2 I)^-1,
@@ -376,9 +367,9 @@ bool PositionSource::forward_kinematics(const Eigen::VectorXd &q, PoseTarget *po
     q_pin_[idx_q_[index]] = q[static_cast<Eigen::Index>(index)];
   }
   pinocchio::framesForwardKinematics(model_, data_, q_pin_);
-  const pinocchio::SE3 base_from_ee = world_from_base_.actInv(data_.oMf[ee_frame_id_]);
-  pose->position = base_from_ee.translation();
-  pose->orientation = Eigen::Quaterniond(base_from_ee.rotation());
+  const pinocchio::SE3 &world_from_ee = data_.oMf[ee_frame_id_];
+  pose->position = world_from_ee.translation();
+  pose->orientation = Eigen::Quaterniond(world_from_ee.rotation());
   return true;
 }
 

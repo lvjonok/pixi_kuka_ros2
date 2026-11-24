@@ -1,6 +1,3 @@
-// Unit tests of PositionSource, the law of fri_position_passthrough_controller
-// (docs/position_source.md), on the iiwa14 description the cell runs. No ROS.
-
 #include "pixi_kuka_ros2/position_source.hpp"
 
 #include <algorithm>
@@ -41,7 +38,6 @@ Eigen::VectorXd nominal() {
   return q;
 }
 
-// The URDF limits, controller order.
 void urdf_limits(Eigen::VectorXd *lower, Eigen::VectorXd *upper) {
   pinocchio::Model model;
   pinocchio::urdf::buildModelFromXML(urdf(), model);
@@ -62,7 +58,6 @@ PositionSourceParams ik_params() {
   return params;
 }
 
-// No gap clamp, no step clamp: the IK alone.
 PositionSourceParams unclamped(PositionSourceParams params) {
   params.max_spring_torque_nm.assign(7, 1e6);
   params.max_joint_step_rad.assign(7, 1e6);
@@ -134,7 +129,7 @@ TEST(PositionSourceParams, InvalidValuesFailConfigure) {
   params.target_timeout_s = 0.0;
   expect_rejected(params, "timeout 0");
 
-  // A margin that leaves no range is caught once a model is loaded.
+  // A margin is checked against the limits, so only once a model is loaded.
   ASSERT_TRUE(source.load_model(urdf(), kJoints, &error)) << error;
   params = ik_params();
   params.joint_limit_margin_rad = 2.5;
@@ -168,7 +163,6 @@ TEST(PositionSourceIk, ConvergesToReachableTargets) {
         source.update(q_meas, kDt, &target);
         ASSERT_FALSE(source.stale());
       }
-      // The output is q_ik when nothing clamps.
       EXPECT_TRUE(bit_identical(source.q_out(), source.q_ik()));
       // With a posture pull the damped projector leaves a residual of order lambda^2 k |v|.
       const double tolerance = nullspace > 0.0 ? 1e-4 : 1e-9;
@@ -181,7 +175,6 @@ TEST(PositionSourceIk, ConvergesToReachableTargets) {
 }
 
 TEST(PositionSourceIk, ConvergesThroughTheTargetFilter) {
-  // crisp's 0.9: the filtered target ramps over ~20 ms, IK follows it.
   PositionSource source = make_source(unclamped(ik_params()));
   const Eigen::VectorXd q_meas = nominal();
   source.activate(q_meas);
@@ -189,7 +182,6 @@ TEST(PositionSourceIk, ConvergesThroughTheTargetFilter) {
   target.position += Eigen::Vector3d(0.03, -0.02, 0.01);
   target.orientation = target.orientation * Eigen::Quaterniond(
       Eigen::AngleAxisd(0.1, Eigen::Vector3d::UnitX()));
-  // The first target initialises the filter; then the target steps.
   source.update(q_meas, kDt, &target);
   PoseTarget moved = target;
   moved.position.z() += 0.02;
@@ -198,7 +190,7 @@ TEST(PositionSourceIk, ConvergesThroughTheTargetFilter) {
     source.update(q_meas, kDt, &moved);
     if (update == 0) first_error = position_error(source, source.q_ik(), moved);
   }
-  EXPECT_GT(first_error, 0.01);  // filtered: not there after one update
+  EXPECT_GT(first_error, 0.01);  // the filter: not there after one update
   EXPECT_LT(position_error(source, source.q_ik(), moved), 1e-4);
   EXPECT_LT(rotation_error(source, source.q_ik(), moved), 1e-4);
 }
@@ -246,7 +238,6 @@ TEST(PositionSourceIk, GapClampHoldsAcrossATargetJumpWhileTheArmTracks) {
       ASSERT_LE(std::abs(source.q_out()[index] - q_meas[index]), gap[index] + 1e-12)
           << "joint " << index << " update " << update;
     }
-    // An arm lagging its command by a fraction: the measured position moves too.
     q_meas += 0.3 * (source.q_out() - q_meas);
   }
 }
@@ -280,18 +271,16 @@ TEST(PositionSourceIk, OutputStepIsClampedPerJoint) {
 TEST(PositionSourceClamps, GapHoldsWhileTheArmOutrunsTheStepLimit) {
   struct Case {
     const char *name;
-    bool targets;           // stream a target (else: the stale fallback)
-    double max_step;        // every joint
+    bool targets;  // false: the stale fallback
     int joint;
     double speed_rad_s;
   };
   const Case cases[] = {
-      {"stale A7 2.35 rad/s", false, 0.004, 6, -2.35},
-      {"streaming A7 2.35 rad/s", true, 0.004, 6, 2.35},
+      {"stale A7 2.35 rad/s", false, 6, -2.35},
+      {"streaming A7 2.35 rad/s", true, 6, 2.35},
   };
   for (const Case &c : cases) {
-    auto params = ik_params();
-    params.max_joint_step_rad.assign(7, c.max_step);
+    const auto params = ik_params();
     const Eigen::VectorXd gap = gap_of(params);
     PositionSource source = make_source(params);
     Eigen::VectorXd q_meas = nominal();
@@ -301,7 +290,7 @@ TEST(PositionSourceClamps, GapHoldsWhileTheArmOutrunsTheStepLimit) {
     double gap_clamped = 0.0;
     double step_clamped = 0.0;
     double worst = 0.0;
-    for (int update = 0; update < 400; ++update) {  // 0.8 s
+    for (int update = 0; update < 400; ++update) {
       q_meas[c.joint] += c.speed_rad_s * kDt;
       source.update(q_meas, kDt, c.targets ? &target : nullptr);
       for (int index = 0; index < 7; ++index) {
@@ -312,7 +301,6 @@ TEST(PositionSourceClamps, GapHoldsWhileTheArmOutrunsTheStepLimit) {
       gap_clamped += source.gap_clamped()[c.joint];
       step_clamped += source.step_clamped()[c.joint];
     }
-    // The case was exercised: the step limit bound, the gap overrode it, and held at the gap.
     EXPECT_GT(step_clamped, 0.0) << c.name;
     EXPECT_GT(gap_clamped, 0.0) << c.name;
     EXPECT_NEAR(worst, gap[c.joint], 1e-12) << c.name;
@@ -333,7 +321,6 @@ TEST(PositionSourceIk, JointLimitMarginHolds) {
     for (int trial = 0; trial < 10; ++trial) {
       const Eigen::VectorXd q_meas = nominal();
       source.activate(q_meas);
-      // Far out of reach, with an arbitrary orientation: the IK presses into its limits.
       PoseTarget target;
       target.position = 1.5 * Eigen::Vector3d(unit(random), unit(random), unit(random));
       target.orientation = Eigen::Quaterniond(unit(random), unit(random), unit(random),
@@ -354,11 +341,11 @@ TEST(PositionSourceIk, JointLimitMarginHolds) {
 }
 
 TEST(PositionSourceIk, StaleTargetFallsBackAndRecoversLikeAFreshActivation) {
-  const auto params = ik_params();  // timeout 0.1 s = 50 updates
+  const auto params = ik_params();
   PositionSource source = make_source(params);
   const Eigen::VectorXd q_meas = nominal();
   source.activate(q_meas);
-  EXPECT_TRUE(source.stale());  // no target yet
+  EXPECT_TRUE(source.stale());
   PoseTarget target = fk(source, nominal());
   target.position += Eigen::Vector3d(0.05, 0.0, -0.03);
   for (int update = 0; update < 100; ++update) {
@@ -367,7 +354,6 @@ TEST(PositionSourceIk, StaleTargetFallsBackAndRecoversLikeAFreshActivation) {
   }
   ASSERT_GT((source.q_out() - q_meas).cwiseAbs().maxCoeff(), 0.01);
 
-  // No target: still fresh up to the timeout, stale after it.
   int stale_at = -1;
   int timed_out_events = 0;
   Eigen::VectorXd previous = source.q_out();
@@ -375,19 +361,17 @@ TEST(PositionSourceIk, StaleTargetFallsBackAndRecoversLikeAFreshActivation) {
     source.update(q_meas, kDt, nullptr);
     if (source.events() & PositionSource::kTargetTimedOut) ++timed_out_events;
     if (stale_at < 0 && source.stale()) stale_at = update;
-    // Rate-limited back to the measured position.
     for (int index = 0; index < 7; ++index) {
       ASSERT_LE(std::abs(source.q_out()[index] - previous[index]), 0.004 + 1e-15);
     }
     previous = source.q_out();
   }
-  EXPECT_NEAR(stale_at, 50, 1);  // 0.1 s of 2 ms ticks, summed in floating point
+  EXPECT_NEAR(stale_at, 50, 1);  // 0.1 s of 2 ms updates, summed in floating point
   EXPECT_EQ(timed_out_events, 1);
   EXPECT_TRUE(source.stale());
   EXPECT_TRUE(bit_identical(source.q_out(), q_meas));
   EXPECT_TRUE(bit_identical(source.q_ik(), q_meas));
 
-  // A target again: IK restarts from the measured position, exactly as after activation.
   PositionSource fresh = make_source(params);
   fresh.activate(q_meas);
   PoseTarget next = target;
@@ -408,7 +392,6 @@ TEST(PositionSourceIk, NonFiniteInputsFallBack) {
   const double nan = std::numeric_limits<double>::quiet_NaN();
   const double inf = std::numeric_limits<double>::infinity();
 
-  // Rejected before any good target: stays the measured position.
   PoseTarget bad;
   bad.position = Eigen::Vector3d(0.5, nan, 0.5);
   source.update(q_meas, kDt, &bad);
@@ -416,7 +399,6 @@ TEST(PositionSourceIk, NonFiniteInputsFallBack) {
   EXPECT_TRUE(source.stale());
   EXPECT_TRUE(bit_identical(source.q_out(), q_meas));
 
-  // A good target, then bad ones: they are dropped and the good one is kept.
   PoseTarget good = fk(source, nominal());
   good.position.z() += 0.05;
   for (int update = 0; update < 20; ++update) source.update(q_meas, kDt, &good);
@@ -435,9 +417,8 @@ TEST(PositionSourceIk, NonFiniteInputsFallBack) {
     reference.update(q_meas, kDt, nullptr);
     EXPECT_TRUE(bit_identical(source.q_ik(), reference.q_ik()));
   }
-  EXPECT_FALSE(bit_identical(source.q_ik(), q_ik_before));  // it kept tracking `good`
+  EXPECT_FALSE(bit_identical(source.q_ik(), q_ik_before));
 
-  // A non-finite or non-positive period: the measured position, rate-limited, then recovery.
   const Eigen::VectorXd out_before = source.q_out();
   for (const double dt : {nan, inf, 0.0, -kDt}) {
     source.update(q_meas, dt, &good);
@@ -466,12 +447,10 @@ TEST(PositionSourceIk, ActivationResetsEverything) {
   EXPECT_TRUE(bit_identical(source.q_out(), q2));
   EXPECT_TRUE(bit_identical(source.q_ik(), q2));
   EXPECT_TRUE(source.stale());
-  // The filtered target is gone: with no new target the output is the measured position.
   source.update(q2, kDt, nullptr);
   EXPECT_TRUE(bit_identical(source.q_out(), q2));
   EXPECT_TRUE(source.stale());
 
-  // And it behaves as a freshly activated source, posture included.
   PositionSource fresh = make_source(ik_params());
   fresh.activate(q2);
   fresh.update(q2, kDt, nullptr);
@@ -503,7 +482,6 @@ TEST(PositionSourceIk, MissingFrameOrModelFallsBackToMeasured) {
     EXPECT_TRUE(bit_identical(source.q_out(), q));
   }
 
-  // No model at all: the same.
   PositionSource no_model;
   ASSERT_TRUE(no_model.configure(7, ik_params(), &error)) << error;
   EXPECT_FALSE(no_model.kinematics_ready());
@@ -557,7 +535,7 @@ TEST(PositionSourceRealtime, UpdateDoesNotAllocate) {
   Eigen::internal::set_is_malloc_allowed(false);
   source.activate(q_meas);
   for (int update = 0; update < 200; ++update) {
-    // Targets, gaps in them (stale), a bad one, a bad period: every branch.
+    // Every branch: targets, a pause that goes stale, a bad target, a bad period.
     const PoseTarget *next = update < 50 ? &target : update == 120 ? &bad
                              : update > 150 ? &target : nullptr;
     source.update(q_meas, update == 160 ? 0.0 : kDt, next);

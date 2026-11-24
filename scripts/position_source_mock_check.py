@@ -4,7 +4,7 @@ It drives the plugin as the controller manager runs it: arming and resting, the 
 subscription, the IK against one computed here, both clamps, the stale fallback, two publishers
 and ~/state.
 
-    ROS_DOMAIN_ID=77 pixi run -e jazzy mock-loopback     # terminal 1
+    pixi run -e jazzy mock-loopback                      # terminal 1
     pixi run -e jazzy check-mock                         # terminal 2
 
 mock_components/GenericSystem copies each position command into the position state at the next
@@ -45,6 +45,7 @@ from lbr_cell import (
     call,
     cell_state,
     controller_states,
+    one_message,
     spinning,
     switch,
 )
@@ -75,7 +76,6 @@ PARAMETERS = (
     "max_spring_torque_nm",
 )
 TARGET_RATE_HZ = 100.0
-DT = 0.002  # controller_manager's update_rate is 500 (config/controllers.yaml)
 REACH_MM = 3.0
 REACH_DEG = 2.0
 EPS = 1e-12
@@ -131,7 +131,6 @@ class Mock(Node):
         self.states: list[State] = []
         self.joints: list[tuple[float, np.ndarray]] = []
         self.logs: list[tuple[float, str]] = []
-        self.urdf: str | None = None
         self.create_subscription(
             Float64MultiArray,
             f"{NS}/{PASSTHROUGH}/state",
@@ -139,12 +138,6 @@ class Mock(Node):
             QoSProfile(depth=2000, reliability=ReliabilityPolicy.RELIABLE),
         )
         self.create_subscription(JointState, f"{NS}/joint_states", self._on_joints, 100)
-        self.create_subscription(
-            String,
-            f"{NS}/robot_description",
-            self._on_urdf,
-            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
-        )
         self.create_subscription(Log, "/rosout", self._on_log, 100)
         self.target_pub = self.create_publisher(PoseStamped, f"{NS}/target_pose", 1)
         self.trajectory = ActionClient(
@@ -163,9 +156,6 @@ class Mock(Node):
         q = np.array([message.position[index[j]] for j in JOINTS])
         with self.lock:
             self.joints.append((time.monotonic(), q))
-
-    def _on_urdf(self, message: String) -> None:
-        self.urdf = message.data
 
     def _on_log(self, message: Log) -> None:
         if PASSTHROUGH in message.name:
@@ -192,7 +182,6 @@ class Mock(Node):
         return cell_state(controller_states(self))
 
     def parameters(self) -> dict:
-        """The passthrough's PARAMETERS."""
         answer = call(
             self,
             GetParameters,
@@ -366,14 +355,20 @@ class Gate:
         self.r = results
 
     def setup(self) -> bool:
-        deadline = time.monotonic() + 10.0
-        while (self.node.urdf is None or not self.node.joints) and time.monotonic() < deadline:
-            time.sleep(0.05)
-        if self.node.urdf is None or not self.node.joints:
-            print("REFUSED: no /lbr/robot_description or /lbr/joint_states: is the mock up?")
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        try:
+            urdf = one_message(self.node, String, f"{NS}/robot_description", latched).data
+        except RuntimeError as why:
+            print(f"REFUSED: {why}")
             return False
-        if "mock_components/GenericSystem" not in self.node.urdf:
+        if "mock_components/GenericSystem" not in urdf:
             print("REFUSED: the robot_description is not mock_components/GenericSystem")
+            return False
+        deadline = time.monotonic() + 10.0
+        while not self.node.joints and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if not self.node.joints:
+            print("REFUSED: no /lbr/joint_states: is the mock up?")
             return False
         if self.node.cell() != "REST":
             print(f"REFUSED: not at REST ({self.node.cell()})")
@@ -383,8 +378,7 @@ class Gate:
             self.values["sunrise_joint_stiffness"]
         )
         self.max_step = np.array(self.values["max_joint_step_rad"])
-        self.kin = Kinematics(self.node.urdf, self.values["end_effector_frame"])
-        self.posture = self.node.q()
+        self.kin = Kinematics(urdf, self.values["end_effector_frame"])
         print(f"gap {fmt(self.gap)} rad, step {fmt(self.max_step)} rad per update")
         ok = self.node.move_joints(np.radians(HOME_DEGREES), 4.0)
         time.sleep(0.3)
@@ -410,11 +404,9 @@ class Gate:
         refused = self.node.try_switch(activate=REST, deactivate=ARMED)
         time.sleep(0.2)
         _, _, logs = self.node.since(mark)
-        # The passthrough's on_deactivate writes the measured position into the command for the
-        # trajectory controller to hold, and logs an error when it could not.
         failed = [m for _, m in logs if "Deactivating without" in m or "Failed to leave" in m]
         return self.r.check(
-            f"{label}: ARMED -> REST, the measured position left in the command",
+            f"{label}: ARMED -> REST, no error from the passthrough's on_deactivate",
             not refused and self.node.cell() == "REST" and not failed,
             f"{self.node.cell()}; "
             + (f"on_deactivate: {failed[0]}" if failed else "no on_deactivate error")

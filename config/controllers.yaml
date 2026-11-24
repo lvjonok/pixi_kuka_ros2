@@ -12,9 +12,6 @@
     joint_state_broadcaster:
       type: joint_state_broadcaster/JointStateBroadcaster
 
-    forward_position_controller:
-      type: position_controllers/JointGroupPositionController
-
     estimated_wrench_interface:
       type: lbr_ros2_control/EstimatedWrenchInterface
 
@@ -43,21 +40,6 @@
 
     cartesian_impedance_controller:
       type: crisp_controllers/CartesianController
-
-    joint_impedance_controller:
-      type: crisp_controllers/CartesianController
-
-/**/forward_position_controller:
-  ros__parameters:
-    joints:
-      - lbr_A1
-      - lbr_A2
-      - lbr_A3
-      - lbr_A4
-      - lbr_A5
-      - lbr_A6
-      - lbr_A7
-    interface_name: position
 
 /**/estimated_wrench_interface:
   ros__parameters:
@@ -93,8 +75,6 @@
       - lbr_A6
       - lbr_A7
 
-    # What the FRI position field carries under the torque overlay (docs/position_source.md):
-    # the IK of the target on target_topic. Sunrise's joint spring is centred on it.
     position_source: ik_target
     target_topic: target_pose
     # As cartesian_impedance_controller's end_effector_frame and filter.target_pose.
@@ -106,9 +86,9 @@
     nullspace_gain: 0.05
     joint_limit_margin_rad: 0.05
     max_joint_step_rad: [0.004, 0.004, 0.004, 0.004, 0.004, 0.004, 0.004]
-    # Not read from the robot: it must be the joint stiffness of the Sunrise app that runs, here
-    # sunrise/FRITorqueDriver.java, and never below it. |q_out - q_meas| is held under
-    # max_spring_torque_nm / sunrise_joint_stiffness.
+    # FRI does not report it: the joint stiffness of the Sunrise application that runs,
+    # sunrise/FRITorqueDriver.java. A value below the application's is the unsafe side
+    # (docs/position_source.md).
     sunrise_joint_stiffness: [1000.0, 1000.0, 1000.0, 500.0, 500.0, 500.0, 500.0]
     max_spring_torque_nm: [5.0, 5.0, 5.0, 4.0, 2.5, 2.5, 1.5]
 
@@ -244,64 +224,4 @@
 
     # The controller publishes nothing itself: its terms are read from
     # /lbr/controller_manager/introspection_data. crisp reads this parameter in on_configure only.
-    enable_introspection: true
-
-/**/joint_impedance_controller:
-  ros__parameters:
-    joints:
-      - lbr_A1
-      - lbr_A2
-      - lbr_A3
-      - lbr_A4
-      - lbr_A5
-      - lbr_A6
-      - lbr_A7
-    end_effector_frame: lbr_link_ee
-    base_frame: lbr_link_0
-
-    filter:
-      q: 0.2
-      dq: 0.2
-      q_ref: 0.2
-      target_pose: 0.1
-      output_torque: 0.2
-
-    # Zero task gains and projector_type none: the nullspace term is the whole law, a joint
-    # impedance of stiffness x weight per joint (100, 100, 75, 75, 40, 25, 15 Nm/rad).
-    task:
-      k_pos_x: 0.0
-      k_pos_y: 0.0
-      k_pos_z: 0.0
-      k_rot_x: 0.0
-      k_rot_y: 0.0
-      k_rot_z: 0.0
-
-    nullspace:
-      stiffness: 5.0
-      damping: 2.0
-      projector_type: none
-      max_tau: 20.0
-      weights:
-        lbr_A1.value: 20.0
-        lbr_A2.value: 20.0
-        lbr_A3.value: 15.0
-        lbr_A4.value: 15.0
-        lbr_A5.value: 8.0
-        lbr_A6.value: 5.0
-        lbr_A7.value: 3.0
-
-    joint_limit_repulsion:
-      enabled: true
-      safe_range: 0.15
-      max_torque: 3.0
-
-    # Nm per joint per control cycle.
-    max_delta_tau: 2.0
-    limit_error: false
-    limit_torques: true
-    use_friction: false
-    use_coriolis_compensation: false
-    use_gravity_compensation: false
-    use_local_jacobian: true
-
     enable_introspection: true

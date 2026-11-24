@@ -4,9 +4,7 @@
 
 REC.jsonl holds one JSON object per line; the rows with "k": "target" are used: "t" in seconds,
 "p" the position in lbr_link_0, "q" the orientation as x, y, z, w. A gains file is a
-`ros2 param load` file of doubles for /lbr/cartesian_impedance_controller. Beside ros__parameters
-it may hold `replay: {lead: true}`, which sends each target (D/K) v ahead of itself, and
-`replay: {max_error_m: 0.04}`, which holds the target within that distance of the arm.
+`ros2 param load` file of doubles for /lbr/cartesian_impedance_controller.
 
 DIR gets one <gains file>.jsonl per run, a row per 10 ms tick with the target sent and the pose
 measured, and summary.json with the scores: the lag that best aligns the arm with the target and
@@ -17,9 +15,10 @@ replay MOVES THE ARM, in T1 with the enabling switch held. It refuses unless
 cartesian_impedance_controller is active, nothing else publishes /lbr/target_pose and an operator
 types 'go' at a terminal. Before each run it walks the target from the measured pose to the
 recording's first pose at 5 cm/s and 15 deg/s. It ends a run, restores the --restore gains and
-follows the measured pose on a tracking error above --abort-m or --abort-deg, a joint above
---abort-speed of its velocity limit or a target under --floor-z, and goes on to the next file.
-A stale pose or a second publisher ends the sweep. --restore is set on every way out.
+follows the measured pose on a tracking error above 0.10 m or 30 deg, a joint above 0.8 of its
+velocity limit or a target under z 0.20 m, and goes on to the next file. A gains file the
+controller refuses is skipped: the --restore gains are set and the sweep goes on. A stale pose or
+a second publisher ends the sweep. --restore is set on every way out.
 """
 
 import argparse
@@ -54,6 +53,11 @@ from sensor_msgs.msg import JointState
 
 TARGET_TOPIC = f"{NS}/target_pose"
 RATE_HZ = 100.0
+SETTLE_S = 2.0
+FLOOR_Z = 0.20
+ABORT_M = 0.10
+ABORT_DEG = 30.0
+ABORT_SPEED = 0.8
 
 
 def load_targets(path: Path) -> tuple[np.ndarray, np.ndarray, Rotation]:
@@ -64,9 +68,7 @@ def load_targets(path: Path) -> tuple[np.ndarray, np.ndarray, Rotation]:
     return t - t[0], np.array([r["p"] for r in rows]), Rotation.from_quat([r["q"] for r in rows])
 
 
-def load_gains(path: str) -> tuple[dict[str, float], dict[str, Any]]:
-    """``(parameters, replay options)`` of a gains file."""
-
+def load_gains(path: str) -> dict[str, float]:
     def flatten(tree: dict[str, Any], prefix: str = "") -> dict[str, float]:
         out: dict[str, float] = {}
         for key, value in tree.items():
@@ -77,7 +79,7 @@ def load_gains(path: str) -> tuple[dict[str, float], dict[str, Any]]:
         return out
 
     (node,) = yaml.safe_load(Path(path).expanduser().read_text()).values()
-    return flatten(node["ros__parameters"]), node.get("replay", {}) or {}
+    return flatten(node["ros__parameters"])
 
 
 class Cell(Node):
@@ -144,7 +146,7 @@ class Cell(Node):
         result = call(self, SetParameters, name, SetParameters.Request(parameters=params))
         refused = [(p.name, r.reason) for p, r in zip(params, result.results) if not r.successful]
         if refused:
-            raise SystemExit(f"{CARTESIAN} refused {refused}")
+            raise Refused(f"{CARTESIAN} refused {refused}")
 
     def publish(self, p: np.ndarray, r: Rotation) -> None:
         msg = PoseStamped()
@@ -157,34 +159,40 @@ class Cell(Node):
         self.pub.publish(msg)
 
 
+class Refused(RuntimeError):
+    """The controller refused a parameter of a gains file; the others of the file are set."""
+
+
 class Abort(Exception):
     """A run must end; the arm is left following its measured pose."""
 
 
+class SweepAbort(Abort):
+    """The sweep must end too: the next run would start blind or beside another publisher."""
+
+
 def _guard(
-    cell: Cell, args: argparse.Namespace, vlim: np.ndarray, p: np.ndarray, r: Rotation
+    cell: Cell, vlim: np.ndarray, p: np.ndarray, r: Rotation
 ) -> tuple[np.ndarray, Rotation, np.ndarray]:
     pose, dq = cell.measured()
     if pose is None or time.monotonic() - pose[0] > 0.2:
-        raise Abort("current_pose is stale (> 0.2 s)")
+        raise SweepAbort("current_pose is stale (> 0.2 s)")
     if cell.count_publishers(TARGET_TOPIC) > 1:
-        raise Abort("another node publishes on /lbr/target_pose")
-    if p[2] < args.floor_z:
-        raise Abort(f"target z {p[2]:.3f} under the floor {args.floor_z}")
+        raise SweepAbort(f"another node publishes on {TARGET_TOPIC}")
+    if p[2] < FLOOR_Z:
+        raise Abort(f"target z {p[2]:.3f} under the floor {FLOOR_Z}")
     _, mp, mr = pose
-    if np.linalg.norm(p - mp) > args.abort_m:
-        raise Abort(f"tracking error {np.linalg.norm(p - mp) * 1e3:.0f} mm > {args.abort_m} m")
-    if np.degrees((r * mr.inv()).magnitude()) > args.abort_deg:
-        raise Abort(f"rotation error > {args.abort_deg} deg")
-    if dq is not None and np.nanmax(np.abs(dq) / vlim) > args.abort_speed:
+    if np.linalg.norm(p - mp) > ABORT_M:
+        raise Abort(f"tracking error {np.linalg.norm(p - mp) * 1e3:.0f} mm > {ABORT_M} m")
+    if np.degrees((r * mr.inv()).magnitude()) > ABORT_DEG:
+        raise Abort(f"rotation error > {ABORT_DEG} deg")
+    if dq is not None and np.nanmax(np.abs(dq) / vlim) > ABORT_SPEED:
         j = int(np.nanargmax(np.abs(dq) / vlim))
         raise Abort(f"{JOINTS[j]} at {abs(dq[j]) / vlim[j]:.0%} of its velocity limit")
     return mp, mr, dq
 
 
-def _approach(
-    cell: Cell, args: argparse.Namespace, vlim: np.ndarray, p0: np.ndarray, r0: Rotation
-) -> None:
+def _approach(cell: Cell, vlim: np.ndarray, p0: np.ndarray, r0: Rotation) -> None:
     """Walk the target from the measured pose to (p0, r0), then settle."""
     _, sp, sr = cell.measured()[0]
     dist = float(np.linalg.norm(p0 - sp))
@@ -193,33 +201,25 @@ def _approach(
     slerp = Slerp([0.0, 1.0], Rotation.concatenate([sr, r0]))
     print(
         f"   approach: {dist * 1e3:.0f} mm, {np.degrees(ang):.1f} deg over {duration:.1f} s, "
-        f"then settle {args.settle_s:.1f} s",
+        f"then settle {SETTLE_S:.1f} s",
         flush=True,
     )
     t0 = time.monotonic()
     while (s := (time.monotonic() - t0) / duration) < 1.0:
         s = 0.5 - 0.5 * np.cos(np.pi * s)
         p, r = sp + s * (p0 - sp), slerp([s])[0]
-        _guard(cell, args, vlim, p, r)
+        _guard(cell, vlim, p, r)
         cell.publish(p, r)
         time.sleep(1.0 / RATE_HZ)
     t0 = time.monotonic()
-    while time.monotonic() - t0 < args.settle_s:
-        _guard(cell, args, vlim, p0, r0)
+    while time.monotonic() - t0 < SETTLE_S:
+        _guard(cell, vlim, p0, r0)
         cell.publish(p0, r0)
         time.sleep(1.0 / RATE_HZ)
 
 
 def _run(
-    cell: Cell,
-    args: argparse.Namespace,
-    vlim: np.ndarray,
-    t: np.ndarray,
-    P: np.ndarray,
-    R: Rotation,
-    lead: tuple[float, float] | None,
-    max_error_m: float | None,
-    log: list[dict[str, Any]],
+    cell: Cell, vlim: np.ndarray, t: np.ndarray, P: np.ndarray, R: Rotation, log: list[dict]
 ) -> None:
     """Send the recorded targets on their own clock; append (sent, measured, dq) each tick."""
     t0 = time.monotonic()
@@ -228,20 +228,8 @@ def _run(
     while (el := time.monotonic() - t0) <= t[-1]:
         while i + 1 < len(t) and t[i + 1] <= el:
             i += 1
-        p, r = P[i], R[i]
-        if lead is not None and i > 0:
-            dt = max(t[i] - t[i - 1], 1e-3)
-            v = (P[i] - P[i - 1]) / dt
-            w = (R[i] * R[i - 1].inv()).as_rotvec() / dt
-            p = p + lead[0] * v
-            r = Rotation.from_rotvec(lead[1] * w) * r
-        if max_error_m is not None:
-            _, mp0, _ = cell.measured()[0]
-            gap = p - mp0
-            if np.linalg.norm(gap) > max_error_m:
-                p = mp0 + gap * (max_error_m / np.linalg.norm(gap))
-        mp, mr, dq = _guard(cell, args, vlim, p, r)
-        cell.publish(p, r)
+        mp, mr, dq = _guard(cell, vlim, P[i], R[i])
+        cell.publish(P[i], R[i])
         log.append(
             {
                 "t": el,
@@ -420,11 +408,8 @@ def fine(
 def replay(cell: Cell, args: argparse.Namespace) -> int:
     rec = Path(args.recording).expanduser()
     t, P, R = load_targets(rec)
-    if args.seconds:
-        keep = t <= args.seconds
-        t, P, R = t[keep], P[keep], R[keep]
-    trials = [(Path(g), *load_gains(g)) for g in args.gains]
-    restore, _ = load_gains(args.restore)
+    trials = [(Path(g), load_gains(g)) for g in args.gains]
+    restore = load_gains(args.restore)
     out = Path(args.out).expanduser()
     out.mkdir(parents=True, exist_ok=True)
 
@@ -432,7 +417,7 @@ def replay(cell: Cell, args: argparse.Namespace) -> int:
     if controller_states(cell).get(CARTESIAN) != "active":
         raise SystemExit(f"{CARTESIAN} is not active: arm the cell first")
     if cell.count_publishers(TARGET_TOPIC) > 1:
-        raise SystemExit("another node publishes on /lbr/target_pose; close it first")
+        raise SystemExit(f"another node publishes on {TARGET_TOPIC}; close it first")
     vlim = joint_limits(cell)[2]
     print(
         f"recording {rec.name}: {len(t)} targets over {t[-1]:.1f} s; "
@@ -448,28 +433,28 @@ def replay(cell: Cell, args: argparse.Namespace) -> int:
 
     results: list[dict[str, Any]] = []
     try:
-        for path, gains, options in trials:
+        for path, gains in trials:
             log: list[dict[str, Any]] = []
-            cell.set_gains(gains)
+            try:
+                cell.set_gains(gains)
+            except Refused as why:
+                cell.set_gains(restore)
+                print(f"\n== {path.name}: SKIPPED: {why}; gains restored", file=sys.stderr)
+                results.append({"gains_file": str(path), "aborted": str(why)})
+                continue
             now = cell.get_gains(["task.k_pos_x", "task.d_pos_x", "task.k_rot_x", "task.d_rot_x"])
-            lead = None
-            if options.get("lead"):
-                lead = (
-                    now["task.d_pos_x"] / now["task.k_pos_x"],
-                    now["task.d_rot_x"] / now["task.k_rot_x"],
-                )
-            print(f"\n== {path.name}: {now} lead={lead}", flush=True)
+            print(f"\n== {path.name}: {now}", flush=True)
             time.sleep(0.3)
             aborted = None
             try:
-                _approach(cell, args, vlim, P[0], R[0])
-                _run(cell, args, vlim, t, P, R, lead, options.get("max_error_m"), log)
+                _approach(cell, vlim, P[0], R[0])
+                _run(cell, vlim, t, P, R, log)
             except Abort as why:
-                _brake(cell, restore, args.settle_s)
+                _brake(cell, restore, SETTLE_S)
                 at = f"{log[-1]['t']:.2f} s into the run" if log else "during the approach"
                 aborted = f"{why} ({at})"
                 print(f"   ABORTED: {aborted}; following the measured pose", file=sys.stderr)
-                if "stale" in str(why) or "another node" in str(why):
+                if isinstance(why, SweepAbort):
                     results.append({"gains_file": str(path), "aborted": aborted})
                     raise
             finally:
@@ -477,8 +462,8 @@ def replay(cell: Cell, args: argparse.Namespace) -> int:
             s = {
                 "gains_file": str(path),
                 "gains": now,
-                "lead": lead,
-                "max_error_m": options.get("max_error_m"),
+                "lead": None,
+                "max_error_m": None,
                 "aborted": aborted,
             }
             if len(log) > 50:
@@ -523,17 +508,6 @@ def main() -> int:
     rep.add_argument("--gains", nargs="+", required=True)
     rep.add_argument("--restore", required=True, help="gains set on every way out")
     rep.add_argument("--out", required=True)
-    rep.add_argument("--seconds", type=float, default=None, help="replay only the first N s")
-    rep.add_argument("--settle-s", type=float, default=2.0)
-    rep.add_argument("--floor-z", type=float, default=0.20)
-    rep.add_argument("--abort-m", type=float, default=0.10)
-    rep.add_argument("--abort-deg", type=float, default=30.0)
-    rep.add_argument(
-        "--abort-speed",
-        type=float,
-        default=0.8,
-        help="fraction of a joint's velocity limit that ends a run",
-    )
     args = parser.parse_args()
     # rclpy's signal handlers shut the context down on ^C, and the gains could then not be
     # restored: without them ^C is a KeyboardInterrupt and replay's finally runs with ROS alive.

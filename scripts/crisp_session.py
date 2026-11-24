@@ -1,4 +1,4 @@
-"""The cell's controllers, joints and flange pose; with --home a joint move, with --switch a switch.
+"""Print the cell's controllers, state, joints and position; --home moves it, --switch switches.
 
     python scripts/crisp_session.py                       # prints only
     python scripts/crisp_session.py --home                # MOVES THE ARM to HOME_DEGREES
@@ -6,7 +6,9 @@
     python scripts/crisp_session.py --switch cartesian_impedance_controller   # REST -> ARMED
     python scripts/crisp_session.py --switch zero_effort_controller           # ARMED -> REST
 
---home runs in T1 with the enabling switch held, and leaves the arm at REST at the target.
+--home runs in T1 with the enabling switch held, and leaves the arm at REST at the target. It
+publishes /lbr/target_pose while it moves, so it is for REST: from ARMED it goes to REST first.
+Without --home nothing is published on a target topic.
 """
 
 import argparse
@@ -15,52 +17,65 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from crisp_py.robot import Robot
-from kuka_crisp import (
-    HOME_SPEED_DEG_S,
-    active_controllers,
-    make_kuka_robot,
-    move_to_home,
-    safe_switch,
+import rclpy
+from geometry_msgs.msg import PoseStamped
+from kuka_crisp import HOME_SPEED_DEG_S, make_kuka_robot, move_to_home, safe_switch
+from lbr_cell import (
+    HOME_DEGREES,
+    JOINTS,
+    NS,
+    ZERO_EFFORT,
+    cell_state,
+    controller_states,
+    one_message,
+    spinning,
 )
-from lbr_cell import HOME_DEGREES, JOINTS, ZERO_EFFORT, cell_state, controller_states
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import JointState
 
 
-def show_joints(robot: Robot, home_degrees: list[float]) -> None:
-    degrees = np.rad2deg(np.asarray(robot.joint_values, dtype=float))
+def show_joints(node: Node, home_degrees: list[float]) -> None:
+    message = one_message(node, JointState, f"{NS}/joint_states", qos_profile_sensor_data)
+    position = dict(zip(message.name, message.position))
+    degrees = np.rad2deg([position[joint] for joint in JOINTS])
     print("\njoint positions [deg]:", np.array2string(degrees, precision=1))
     print("home target     [deg]:", np.array2string(np.asarray(home_degrees), precision=1))
     print("delta from home [deg]:", np.array2string(degrees - home_degrees, precision=1))
 
 
-def show_active(robot: Robot) -> None:
+def show_active(node: Node) -> None:
     print("active controllers now:")
-    for name in sorted(active_controllers(robot)):
-        print(f"  ACTIVE   {name}")
+    for name, state in sorted(controller_states(node).items()):
+        if state == "active":
+            print(f"  ACTIVE   {name}")
 
 
-def run(robot: Robot, args: argparse.Namespace, home_degrees: list[float]) -> None:
-    states = controller_states(robot.node)
+def run(node: Node, args: argparse.Namespace, home_degrees: list[float]) -> None:
+    states = controller_states(node)
     print("controllers:")
     for name, state in sorted(states.items()):
         print(f"    {'ACTIVE  ' if state == 'active' else f'{state:<8}'} {name}")
     print(f"\ncell: {cell_state(states)}")
-    show_joints(robot, home_degrees)
-    position = np.asarray(robot.end_effector_pose.position)
+    show_joints(node, home_degrees)
+    pose = one_message(node, PoseStamped, f"{NS}/current_pose", qos_profile_sensor_data).pose
+    position = np.array([pose.position.x, pose.position.y, pose.position.z])
     print("\nEE position [m]:", np.array2string(position, precision=3))
 
     if args.home:
-        if ZERO_EFFORT not in active_controllers(robot):
+        if cell_state(states) != "REST":
             print(f"\nswitching to {ZERO_EFFORT} (REST)")
-            safe_switch(robot, ZERO_EFFORT)
+            safe_switch(node, ZERO_EFFORT)
         print("\nmoving to home. Keep the enabling switch held.")
+        robot = make_kuka_robot()
+        robot.wait_until_ready(timeout=15.0)
         move_to_home(robot, degrees=home_degrees, speed_deg_s=args.speed)
-        show_joints(robot, home_degrees)
-        show_active(robot)
+        show_joints(node, home_degrees)
+        show_active(node)
     if args.switch:
         print(f"\nswitching to {args.switch} ...")
-        safe_switch(robot, args.switch)
-        show_active(robot)
+        safe_switch(node, args.switch)
+        show_active(node)
 
 
 def main() -> int:
@@ -91,23 +106,23 @@ def main() -> int:
     home_degrees = list(HOME_DEGREES)
     if args.home_file is not None:
         captured = json.loads(args.home_file.expanduser().read_text())
-        names = [name.removesuffix(".pos") for name in captured["joint_names"]]
-        if names != list(JOINTS):
-            parser.error(f"{args.home_file} names {names}, not {', '.join(JOINTS)}")
+        if captured["joint_names"] != list(JOINTS):
+            parser.error(
+                f"{args.home_file} names {captured['joint_names']}, not {', '.join(JOINTS)}"
+            )
         home_degrees = [float(np.degrees(value)) for value in captured["position"]]
         print(f"home from {args.home_file}: {np.round(home_degrees, 2).tolist()} deg")
 
-    print("connecting to /lbr ...")
-    robot = make_kuka_robot()
+    rclpy.init()
+    node = rclpy.create_node("crisp_session")
     try:
-        robot.wait_until_ready(timeout=15.0)
-        print("connected.\n")
-        run(robot, args, home_degrees)
+        with spinning(node):
+            run(node, args, home_degrees)
     except (RuntimeError, ValueError, TimeoutError) as why:
         print(f"\n{why}")
         return 1
     finally:
-        robot.shutdown()
+        rclpy.try_shutdown()
     return 0
 
 

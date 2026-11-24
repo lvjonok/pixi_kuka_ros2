@@ -30,17 +30,20 @@ channels = ["https://prefix.dev/robostack-jazzy"]
 [feature.jazzy.dependencies]
 colcon-common-extensions = "*"
 pinocchio = ">=3.7.0,<4"
+pyyaml = "*"
 ros-jazzy-desktop = "*"
 ros-jazzy-generate-parameter-library = "*"
 ros-jazzy-rmw-cyclonedds-cpp = "*"
 ros-jazzy-ros2-control = "*"
 ros-jazzy-ros2-controllers = "*"
 ros-jazzy-xacro = ">=2.0.13,<3"
+scipy = "*"
 
 [feature.jazzy.pypi-dependencies]
 crisp-python = ">=3.0.0,<4"
 # controller_manager's spawner imports it; the conda package does not depend on it.
 filelock = ">=3.20,<4"
+# Nothing here imports it: the consumer's scripts run in this environment and do.
 viser = { version = ">=0.2", extras = ["urdf"] }
 
 [feature.jazzy.tasks]
