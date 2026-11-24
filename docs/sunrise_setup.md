@@ -37,9 +37,8 @@ What this workspace needs, whatever the addresses turn out to be:
 - Exactly one default route may exist on the workstation, and it is not the
   robot one.
 
-The simplest arrangement, and the one this workspace was commissioned on, is a
-second address on the workstation's existing NIC rather than a controller-side
-change:
+The simplest arrangement, and the one this cell uses, is a second address on the
+workstation's existing NIC rather than a controller-side change:
 
 ```text
 workstation  <nic> --+
@@ -82,18 +81,11 @@ the Linux hosts on a lab subnet even if the MAC is unknown.
 `30200/tcp` reads as closed and that is correct: FRI is UDP, and the port only
 listens while `LBRServer` is running on the smartPAD.
 
-### A cautionary note on addresses found by guesswork
+### Read the address, do not infer it
 
-An early revision of this workspace recorded a cabinet address on the lab subnet,
-identified by watching ARP while X66 was unplugged and replugged. It did not
-reproduce: a full ARP sweep of that subnet with X66 connected and again with it
-disconnected returned the same hosts in both states, and the recorded address
-answered in neither. The controller was on the factory `172.31.1.0/24` subnet the
-whole time.
-
-Confirm against the controller itself — the smartPAD screen, Workbench's
-connection, or a matched MAC. Do not carry forward an address that was inferred
-rather than read.
+Confirm the address against the controller itself: the smartPAD screen, Workbench's
+connection, or a matched MAC. An address inferred from watching ARP while X66 is unplugged
+and replugged can belong to another host.
 
 ## Debugging X66 reachability
 
@@ -106,8 +98,7 @@ the addresses below are the KUKA factory defaults.
 ### Do not use ping as the test
 
 The cabinet does not answer ICMP echo requests. A silent `ping` means nothing at all,
-in either direction, and reading it as "the robot is down" is how a wrong address
-survives in a note for weeks.
+in either direction.
 
 Test with ARP instead. ARP is answered by the NIC itself, below any firewall, so it
 reports whether the controller is physically on the wire regardless of what Sunrise is
@@ -162,9 +153,8 @@ is transmitting and the problem is physical or the cabinet is not finished booti
 
 ### 5. Read the switch LED correctly
 
-**A red LED on the X66 port can be a working link.** Observed once: the port showed
-red while the cabinet was booting, and the same port carried a confirmed ARP reply
-from the controller minutes later with nothing recabled.
+**A red LED on the X66 port can be a working link.** A port that shows red while the
+cabinet boots can carry the controller's ARP reply minutes later with nothing recabled.
 
 On many multi-gig switches the per-port LED encodes negotiated speed rather than
 health — green for a 10G link, amber or red below it. The KLI negotiates well under
@@ -176,8 +166,8 @@ the X66 port, or a dead switch port.
 
 The KLI comes up late in the Sunrise boot. A cabinet that is powered but still booting
 is completely silent: no ARP reply, no link-up frame, nothing in a passive capture.
-This has happened here: steps 2 through 4 all came back empty and the same scan
-succeeded a few minutes later with no change to either end.
+Steps 2 through 4 can all come back empty and the same scan succeed a few minutes later
+with no change to either end.
 
 Before concluding that the robot is unreachable, confirm the smartPAD has finished
 starting and re-run step 2.
@@ -281,26 +271,26 @@ Dialog answers for this workspace:
 | FRI control mode | `JOINT_IMPEDANCE_CONTROL` |
 | FRI client command mode | `TORQUE` |
 
-## Open item: Sunrise joint stiffness
+## Sunrise joint stiffness
 
 `LBRServer.java` hardcodes `new JointImpedanceControlMode(200, 200, 200, 200, 200,
-200, 200)`, that is 200 Nm/rad on every axis. In `TORQUE` client command mode the
-CRISP overlay is added on top of that impedance law, so Sunrise actively pulls back
-toward the held position and works against `cartesian_impedance_controller`.
+200, 200)`, that is 200 Nm/rad on every axis. In `TORQUE` client command mode the torque
+overlay is added on top of that impedance law, around the position FRI carries. At REST
+that position is fixed and the spring holds the arm. ARMED with `position_source`
+`measured` it follows the arm and the spring adds nothing
+([`position_source.md`](position_source.md)).
 
-Run the first zero-overlay bringup at the stock 200 Nm/rad and decide from measured
-behaviour. Lowering it toward zero means the arm is held only by the ROS-side torque
-commands, which is a separate commissioning decision with its own safety review, not
-a tuning tweak.
+Lowering the stiffness toward zero means the arm is held only by the ROS-side torque
+commands, which is a separate commissioning decision with its own safety review, not a
+tuning tweak.
 
 ## Second app: `LBRServerJointImpedance` (stiffness and damping presets)
 
 [`sunrise/LBRServerJointImpedance.java`](../sunrise/LBRServerJointImpedance.java) is
 `LBRServer` with the control mode fixed to `JOINT_IMPEDANCE_CONTROL` and the command mode to
-`TORQUE`, plus a stiffness and a damping preset dialog
-([`position_source.md`](position_source.md#sunrise-side-second-app-optional-for-stiffness-above-200)).
-It is installed **beside** `LBRServer`, which stays as it is and remains the app to run unless
-a test calls for another preset. The file has **not been compiled**: there is no Sunrise SDK on
+`TORQUE`, plus a stiffness and a damping preset dialog. It is installed **beside**
+`LBRServer`, which stays as it is and remains the app to run unless a test calls for another
+preset. The file has **not been compiled**: there is no Sunrise SDK on
 Linux, so the first build is the Workbench one below.
 
 ### Install: sync applications only
@@ -309,16 +299,14 @@ Linux, so the first build is the Workbench one below.
    [Procedure](#procedure). Record the safety configuration checksum (step 3).
 2. Open the retrieved `src/lbr_fri_ros2/LBRServer.java` and read its
    `JointImpedanceControlMode(...)` line and any `setDampingForAllJoints(...)` call. The first
-   entry of each preset dialog is meant to be exactly that: 200 Nm/rad on every joint and
-   damping 0.3. The 0.3 is the operator's recollection of the 26 Sep 2026 change
-   ([`config/tune/README.md`](../config/tune/README.md), sweep 5), not a value read from the
-   cabinet. If the cabinet's copy differs, edit the first entries of `stiffness_presets_` /
-   `damping_presets_` (and their labels) to match it before going on. **No
-   `setDampingForAllJoints(...)` call means damping 0.7**, KUKA's default for a
-   `JointImpedanceControlMode` (the stock lbr-stack `ros2-fri-1.15` `LBRServer.java` has none).
-   Then today is 0.7, not 0.3: make the first damping preset `0.7` labelled `0.7 (today)`, keep
-   `0.3` as a separate option (drop the now duplicate `0.7 (KUKA default)` entry), and correct
-   the "damping 0.3" in [`position_source.md`](position_source.md) and the app's header comment.
+   entry of each preset dialog must be exactly that. The file has 200 Nm/rad on every joint
+   and damping 0.3, and the 0.3 was not read from the cabinet. If the cabinet's copy differs,
+   edit the first entries of `stiffness_presets_` / `damping_presets_` (and their labels) to
+   match it before going on. **No `setDampingForAllJoints(...)` call means damping 0.7**,
+   KUKA's default for a `JointImpedanceControlMode` (the stock lbr-stack `ros2-fri-1.15`
+   `LBRServer.java` has none): then make the first damping preset `0.7` labelled
+   `0.7 (today)`, keep `0.3` as a separate option, and drop the duplicate
+   `0.7 (KUKA default)` entry.
 3. Copy `LBRServerJointImpedance.java` into `src/lbr_fri_ros2/` next to `LBRServer.java`. The
    package already exists from the `LBRServer` install; the file's first line is
    `package lbr_fri_ros2;`.
@@ -347,7 +335,7 @@ last dialog). Four dialogs:
 | Joint impedance stiffness | `200 all (today)` unless the test says otherwise | `200 all (today)`, `500 all`, `1000 A1-A3, 500 A4-A7 (Drake)` |
 | Joint impedance damping | `0.3 (today)` unless the test says otherwise | `0.3 (today)`, `0.7 (KUKA default)`, `1.0 (Drake)` |
 
-The first option of each dialog reproduces today's `LBRServer`. The app logs every answer and,
+The first option of each dialog is what `LBRServer` runs. The app logs every answer and,
 before holding position, the stiffness array, damping and command mode it runs with; read the
 smartPAD log to confirm them.
 
@@ -366,8 +354,17 @@ app runs at 1000 lets through five times the intended spring torque. So:
 - Write the running preset (stiffness and damping) into the session's notes; damping is not a
   controller parameter and appears nowhere else.
 - Any preset above 200 only after the safety review
-  [`commissioning_protocol.md`](commissioning_protocol.md) requires, and only with
-  `position_source` validated at 200 first ([`position_source.md`](position_source.md#plan-and-gates)).
+  [`commissioning_protocol.md`](commissioning_protocol.md) requires, and only after the
+  `position_source` mode in use has been checked on the arm at 200
+  ([`position_source.md`](position_source.md)).
+
+## Third app: `FRITorqueDriver`
+
+[`sunrise/FRITorqueDriver.java`](../sunrise/FRITorqueDriver.java) is a torque-overlay application
+with fixed values and no dialogs: client `172.31.1.148` on port 30200, send period 2 ms, joint
+impedance 1000/1000/1000/500/500/500/500 Nm/rad with damping 1.0. It has not been compiled
+either, and goes in by the same sync. With it running, `sunrise_joint_stiffness` must be those
+seven numbers, and [the stiffness rule](#the-stiffness-rule) holds.
 
 ## Network caveat
 

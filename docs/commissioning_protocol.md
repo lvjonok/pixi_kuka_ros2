@@ -1,7 +1,7 @@
 # KUKA iiwa 14 R820 commissioning protocol
 
-This protocol records the verified startup procedure for the lab robot. Complete every
-safety gate before starting FRI or activating a CRISP torque controller.
+The startup procedure for the cell's robot. Complete every safety check here before starting
+FRI or activating a crisp torque controller.
 
 ## Before you start: record your cell
 
@@ -47,9 +47,7 @@ starting before treating it as a fault, then follow
 
 ## Position-reference warning after startup
 
-Verified on 2026-08-20.
-
-Observed smartPAD warning:
+After startup the smartPAD can show:
 
 ```text
 Position sensor not referenced (K1: A1, A2, A3, A4, A5, A6, A7)
@@ -69,7 +67,7 @@ position-sensor warning.
 5. On the smartPAD, open **Applications** and select
    `PositionAndGMSReferencing`.
 6. Select the operating mode required by the installed KUKA reference application
-   (the lab procedure succeeded using its normal automatic reference sequence).
+   (on this cell: its normal automatic reference sequence).
 7. Start the application and follow the smartPAD prompts through the complete A1-A7
    trajectory. Do not interrupt the sequence.
 8. Open **Safety -> Status** and confirm that `Position sensor not referenced` has
@@ -82,15 +80,15 @@ remastering without following the matching KUKA manual and site safety procedure
 
 ## Axis driven outside its limit
 
-Observed on 2026-08-26. A4 was jogged manually to **-121 deg** against a **-120 deg**
-limit. The smartPAD then showed, from the drive rather than from the safety
+An axis jogged past its limit, for example A4 at **-121 deg** against a **-120 deg** limit,
+gives this message on the smartPAD, from the drive rather than from the safety
 configuration:
 
 ```text
 Error in bus interface THIN4MAdapter: hardware limit exceeded, drive 4
 ```
 
-The message could not be acknowledged and KRF was not offered in the mode list, which
+The message cannot be acknowledged and KRF is not offered in the mode list, which
 leaves the axis stuck: T1 enforces the range the axis is already outside of.
 
 **Recovery for this cell: unmaster the offending axis, jog it back inside its range, then
@@ -120,18 +118,15 @@ unmaster.
   steps.
 - Afterwards, re-run the A1-A7 position referencing and confirm `Safety -> Status` is
   clear before restarting FRI.
-- Record what was unmastered, when, and the recalibration result. A commissioning history
-  that silently loses mastering data is worse than no history.
+- Record what was unmastered, when, and the recalibration result.
 
 ### Prevention
 
-Jogging is the exposure, not the ROS side. `move_to_home` range-checks its target
-against the axis limits, but the limits it checks are the specification values with no
-working margin, and it does not check the pose it starts from. Both are open items.
+Jogging is the exposure, not the ROS side. `move_to_home` refuses a target outside the
+position limits of the robot description, which are 1 deg inside the axis limits. It does
+not check the pose it starts from.
 
 ## Operating modes and unattended operation
-
-Verified on 2026-08-25.
 
 T1 with the enabling switch held is a commissioning mode, not a run mode. The modes
 this cabinet offers:
@@ -166,7 +161,7 @@ smartPAD within reach rather than stowed.
 
 ### Operator safety blocks AUT on this cell
 
-Observed on 2026-08-25 when first selecting AUT:
+With the customer PSM table active, selecting AUT gives:
 
 ```text
 Operator safety is active
@@ -192,13 +187,11 @@ Three legitimate routes:
    operator-safety input. AUT then works as designed and the safety config barely
    changes.
 2. **Deactivate the customer PSM table.** Removes the row that blocks AUT, leaving only
-   KUKA's default safety configuration. Fast, reversible, and the route taken to unblock
-   commissioning on this cell. It buys AUT at the cost of every customer-defined
-   monitoring function, so it is an interim state, not a destination. See
+   KUKA's default safety configuration. Fast, reversible, and what this cell runs with.
+   It buys AUT at the cost of every customer-defined monitoring function. See
    [Deactivating the customer PSM to reach AUT](#deactivating-the-customer-psm-to-reach-aut).
 3. **Reconfigure for collaborative operation.** Replace that row with Power and Force
-   Limiting monitoring so the arm is provably safe to be near without a fence. This is
-   the intended end state for this cell. See
+   Limiting monitoring so the arm is provably safe to be near without a fence. See
    [Reconfiguring for collaborative (PFL) operation](#reconfiguring-for-collaborative-pfl-operation).
 
 **Never bridge or jumper the operator-safety input.** It tells the cabinet a guard is
@@ -210,7 +203,7 @@ cabinet reporting a guard that does not exist.
 
 ## Deactivating the customer PSM to reach AUT
 
-Verified on 2026-08-26. This is the current configuration of the cell.
+This is the configuration the cell runs with.
 
 Deactivating the customer PSM table clears
 `Operator safety is active / user PSM table row 2` and lets the keyswitch select AUT.
@@ -254,7 +247,7 @@ configuration to run collaborative work under.
 5. Activate the safety configuration. The cabinet requires the activation to be
    confirmed and then restarts.
 6. Record the **new** safety checksum. It has changed, and it is the new baseline for
-   the pre-FRI gate. The old value is history, not a target.
+   the list [before FRI starts](#before-fri-starts). The old value is not a target.
 7. After the restart, re-check `Safety` -> `Status` for
    `Position sensor not referenced`. A safety configuration activation restarts the
    controller, and the A1-A7 referencing must be redone if the warning is back. See
@@ -275,16 +268,14 @@ archived untouched project copy instead of trying to reconstruct rows by hand.
 - **Not a collaborative cell.** No force or velocity limit has been measured or
   configured. Tuning CRISP gains still belongs in T1, where releasing the enabling
   switch stops the arm.
-- **Not a permanent state.** The PFL work below is still the plan.
 
 ## Reconfiguring for collaborative (PFL) operation
 
-**Status: not started as of 2026-08-26.** This section is the plan, not a record of
-work done. Nothing below is a validated limit value. The cell currently runs with the
-customer PSM table deactivated instead, which is the interim state described above and
-provides none of what follows.
+**The cell has no PFL configuration.** No force, pressure or velocity limit has been
+measured or configured, and nothing below is a validated limit value. The cell runs with
+the customer PSM table deactivated, which provides none of what follows.
 
-This is four pieces of work and only the third happens in Sunrise Workbench.
+It takes four pieces of work, and only the third happens in Sunrise Workbench.
 
 ### 1. Risk assessment
 
@@ -296,9 +287,8 @@ configuration exists.
 
 ### 2. Choose the collaborative mode
 
-ISO 10218 and ISO/TS 15066 define four. Power and Force Limiting is the intended one
-here. Speed and separation monitoring is worth considering if area scanners are
-already available.
+ISO 10218 and ISO/TS 15066 define four. This section is about Power and Force Limiting.
+Speed and separation monitoring is worth considering if area scanners are available.
 
 ### 3. Configure in Sunrise
 
@@ -326,7 +316,7 @@ Requires safety rights (`Safety` -> `Activation`, `Safety maintenance technician
 force and pressure limits are validated against biomechanical limits for each
 contactable body region, using a force/pressure measuring device, with the actual
 tool and payload at the actual speeds. Do not copy limit values from any document,
-including this one. Record the measured values here once they exist.
+including this one.
 
 Then: sign-off by an authorized safety commissioner, record the new safety checksum,
 and update the cell documentation.
@@ -349,12 +339,11 @@ and update the cell documentation.
   `safe_stop` command guard, are software on a general-purpose Linux box speaking UDP.
   They are useful. They are not safety-rated and must never be credited as a mitigation
   in the risk assessment.
-- **The 200 Nm/rad Sunrise joint stiffness currently helps.** The arm is already
-  compliant, which is friendly to force limits. The open item in
-  [`sunrise_setup.md`](sunrise_setup.md) about lowering that stiffness toward zero would
-  leave the arm held only by ROS-side torque commands. That materially changes the
-  safety picture and requires the risk assessment to be revisited. Do not treat it as a
-  tuning tweak.
+- **The 200 Nm/rad Sunrise joint stiffness helps.** The arm is compliant, which is
+  friendly to force limits. Lowering that stiffness toward zero
+  ([`sunrise_setup.md`](sunrise_setup.md#sunrise-joint-stiffness)) would leave the arm held
+  only by ROS-side torque commands. That materially changes the safety picture and
+  requires the risk assessment to be revisited. Do not treat it as a tuning tweak.
 - **`position_source: ik_target` and a stiffer Sunrise app change the picture too**
   ([`position_source.md`](position_source.md)). Under `measured` that spring is centred on the
   measured position and applies nothing. Under `ik_target` (and, by a little, `lagged`) the
@@ -365,12 +354,11 @@ and update the cell documentation.
   stiffness (`LBRServerJointImpedance`'s presets above 200 Nm/rad) is a stiffness change in the
   same sense as lowering it: it needs the same revisit of the risk assessment before it runs,
   and `sunrise_joint_stiffness` changed to match in the same step. Raising
-  `max_spring_torque_nm` above the specification's defaults is a limit change, not a tuning
-  step. `position-source set` refuses any such change for `lagged` and `ik_target` (a stiffness
+  `max_spring_torque_nm` above the defaults is a limit change, not a tuning step. `position-source set` refuses any such change for `lagged` and `ik_target` (a stiffness
   other than 200, a larger `max_spring_torque_nm`, a wider gap, a larger `max_joint_step_rad`)
   unless given `--limit-change-reviewed`, which is for after this review.
-- **Every safety stop kills the FRI session** and needs a full `lbr_bringup` relaunch
-  plus the four smartPAD dialogs. Budget for it in the tuning loop.
+- **Every safety stop ends the FRI session** and needs a relaunch of
+  `pixi run -e jazzy hardware` plus the four smartPAD dialogs.
 
 ### Unattended startup needs more than AUT
 
@@ -380,7 +368,7 @@ values in `LBRServer.java` (send period `2`, the FRI client address,
 `JOINT_IMPEDANCE_CONTROL`, `TORQUE`) and wrap the session in a retry loop so it
 reconnects after a drop instead of exiting.
 
-## Gate before FRI
+## Before FRI starts
 
 The Windows-side installation of `LBRServer` is a prerequisite and is documented
 separately in [`sunrise_setup.md`](sunrise_setup.md).
@@ -401,63 +389,60 @@ Do not start `LBRServer` or `pixi run -e jazzy hardware` until all of these are 
 - `LBRServer` is configured for the ROS workstation's address on the robot subnet,
   a 2 ms send period, `JOINT_IMPEDANCE_CONTROL`, and `TORQUE` client command mode.
 
-The first hardware launch must retain `fri_position_passthrough_controller` and
-`zero_effort_controller` as active while both CRISP torque controllers remain inactive.
+The stack must come up at REST: `joint_trajectory_controller` and `zero_effort_controller`
+active, `fri_position_passthrough_controller` and both crisp torque controllers inactive.
 
 ## Moving to the home configuration
 
-The home configuration is `[0, 30, 0, -75, 0, 75, 0]` degrees on A1-A7. It was chosen
-for limit margin and conditioning: every joint at least 45 deg from its limit,
-manipulability sqrt(det(J J^T)) of 0.126 against 0.044 for crisp_py's own iiwa pose and
-exactly 0 at the all-zeros candle pose, which is fully singular and a bad place to start
-tuning a Cartesian impedance controller. `scripts/kuka_crisp.py::HOME_DEGREES` is the
-single source of truth for the number.
+The home configuration is `[0, 30, 0, -75, 0, 75, 0]` degrees on A1-A7. Every joint is at
+least 45 deg from its axis limit, and the manipulability sqrt(det(J J^T)) is 0.126 there; it
+is 0 at the all-zero pose, which is singular. The number is `HOME_DEGREES` in
+`scripts/lbr_cell.py`.
 
 ### How the move works
 
 The arm is moved by commanding **positions**, not torques. `joint_trajectory_controller`
-takes the position command interfaces for the duration of the move; FRI passes the
-commanded positions to Sunrise's joint impedance controller at the 200 Nm/rad stiffness
-`LBRServer` sets, and `zero_effort_controller` keeps supplying the zero torque overlay
-throughout. Nothing in this workspace commands a torque during a home move.
+holds the position command interfaces at REST and runs the move; FRI passes the commanded
+positions to Sunrise's joint impedance controller at the 200 Nm/rad stiffness `LBRServer`
+sets, and `zero_effort_controller` supplies the zero torque overlay throughout. Nothing in
+this workspace commands a torque during a home move.
 
 `joint_trajectory_controller` and `fri_position_passthrough_controller` claim the same
-position command interfaces, so exactly one may be active. `move_to_home()` in
-`scripts/kuka_crisp.py` swaps them with `STRICT` strictness, runs the trajectory, and
-swaps back in a `finally` block so an aborted or rejected goal still returns the position
-command to the passthrough.
+position command interfaces, so only one of them is active. `move_to_home()` in
+`scripts/kuka_crisp.py` runs the trajectory at REST and leaves the arm at REST: the
+trajectory controller stays active and holds the last commanded position, which is the
+target, or the point where an aborted goal stopped. From ARMED, `crisp_session.py --home`
+first goes to REST with one strict switch.
 
-This replaces crisp_py's `Robot.home()`, which cannot be used here: it switches
-controllers through crisp_py's own switcher, which would deactivate
-`zero_effort_controller` and leave the FRI torque overlay unowned while the arm is
-moving, and it sends `BEST_EFFORT`, which reports success after a partial switch.
+crisp_py's `Robot.home()` is not used on this cell: it moves in a fixed 5 s whatever the
+distance, and its switcher sends `BEST_EFFORT`, which reports success after a partial
+switch.
 
 ### Running it
 
 In T1, enabling switch held, workspace clear, for the whole move:
 
 ```bash
-pixi run -e jazzy session --home
+pixi run -e jazzy python scripts/crisp_session.py --home
 ```
 
-Refusals to expect, all of them deliberate:
+It refuses:
 
-- `fri_position_passthrough_controller` or `zero_effort_controller` not active
-- a CRISP torque controller active — switch back to `zero_effort_controller` first
-- a target angle outside the iiwa14 R820 axis limits, checked locally against
-  `[170, 120, 170, 120, 170, 120, 175]` degrees so that an out-of-range target is caught
-  here rather than by the FRI command guard, which reacts by dropping the session
+- when neither `joint_trajectory_controller` nor `fri_position_passthrough_controller` is
+  active, or `zero_effort_controller` is not;
+- `move_to_home()` called with a crisp torque controller active (`crisp_session.py --home`
+  goes to REST first);
+- a target angle outside the position limits of the robot description, `[169, 119, 169,
+  119, 169, 119, 174]` degrees, so that it is refused here and not by the FRI command
+  guard, which ends the session.
 
-Duration is derived from the largest joint delta at 10 deg/s, so a 165 deg move takes
+The duration is the largest joint delta at 10 deg/s, and at least 2 s: a 165 deg move takes
 16.5 s. Override with `--speed`, upward only with care: the FRI command guard trips on
-**measured** velocity exceeding the URDF limit and answers by stopping the session.
-
-Verified end to end against mock hardware on 2026-08-26: strict swap out, trajectory,
-arrival within 1.3e-6 deg, strict swap back, passthrough active again. **Not yet run on
-the cabinet.**
+**measured** velocity exceeding the limit of the robot description and answers by stopping
+the session.
 
 ### Releasing the enabling switch mid-move
 
-It drops `COMMANDING_ACTIVE`, which tears down the FRI session and every controller on
-it, and needs a full `lbr_bringup` relaunch plus the four smartPAD dialogs. Plan the move
-as one continuous hold.
+It drops `COMMANDING_ACTIVE`, which ends the FRI session and every controller on it, and
+needs a relaunch of `pixi run -e jazzy hardware` plus the four smartPAD dialogs. Plan the
+move as one continuous hold.
