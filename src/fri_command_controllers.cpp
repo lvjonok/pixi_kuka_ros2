@@ -59,12 +59,7 @@ class FRIPositionPassthroughController : public controller_interface::Controller
   }
 
   controller_interface::InterfaceConfiguration state_interface_configuration() const override {
-    controller_interface::InterfaceConfiguration configuration;
-    configuration.type = controller_interface::interface_configuration_type::INDIVIDUAL;
-    for (const auto &joint : joints_) {
-      configuration.names.push_back(joint + "/" + hardware_interface::HW_IF_POSITION);
-    }
-    return configuration;
+    return command_interface_configuration();
   }
 
   controller_interface::CallbackReturn on_configure(
@@ -113,15 +108,15 @@ class FRIPositionPassthroughController : public controller_interface::Controller
 
   controller_interface::CallbackReturn on_activate(
       const rclcpp_lifecycle::State &) override {
-    // FAILURE, not ERROR: ros2_control then leaves the controller configured, and it activates
-    // once the parameter is fixed.
+    // FAILURE, not ERROR: the controller then stays configured and can be activated again. After
+    // ERROR ros2_control leaves it unconfigured.
     std::string error;
     if (!configure_source(&error)) {
       RCLCPP_ERROR(get_node()->get_logger(), "%s", error.c_str());
       return controller_interface::CallbackReturn::FAILURE;
     }
     if (!read_measured_positions()) {
-      return controller_interface::CallbackReturn::ERROR;
+      return controller_interface::CallbackReturn::FAILURE;
     }
     // A target received before this activation is never used.
     last_target_ = received_targets_.load();
@@ -141,7 +136,7 @@ class FRIPositionPassthroughController : public controller_interface::Controller
                    source_.kinematics_error().c_str());
     }
     return write_commands() ? controller_interface::CallbackReturn::SUCCESS
-                            : controller_interface::CallbackReturn::ERROR;
+                            : controller_interface::CallbackReturn::FAILURE;
   }
 
   controller_interface::CallbackReturn on_deactivate(
@@ -182,10 +177,9 @@ class FRIPositionPassthroughController : public controller_interface::Controller
     source_.update(q_meas_, period.seconds(), new_target ? &target_ : nullptr);
     warn_about(source_.events());
 
-    const bool written = write_commands();
+    write_commands();
     publish_state();
-    return written ? controller_interface::return_type::OK
-                   : controller_interface::return_type::ERROR;
+    return controller_interface::return_type::OK;
   }
 
  private:
@@ -231,15 +225,8 @@ class FRIPositionPassthroughController : public controller_interface::Controller
   bool configure_source(std::string *error) {
     PositionSourceParams params;
     std::string topic;
-    try {
-      if (!read_parameters(&params, &topic, error)) {
-        return false;
-      }
-    } catch (const std::exception &exception) {
-      *error = std::string("Reading the position_source parameters failed: ") + exception.what();
-      return false;
-    }
-    if (!source_.configure(joints_.size(), params, error)) {
+    if (!read_parameters(&params, &topic, error) ||
+        !source_.configure(joints_.size(), params, error)) {
       return false;
     }
     if (!target_subscription_ || topic != subscribed_topic_) {
@@ -282,7 +269,6 @@ class FRIPositionPassthroughController : public controller_interface::Controller
     return true;
   }
 
-  // False when a joint has no finite position state; q_meas_ keeps that joint's last one.
   bool read_measured_positions() {
     bool all_finite = true;
     for (std::size_t index = 0; index < joints_.size(); ++index) {
@@ -302,15 +288,16 @@ class FRIPositionPassthroughController : public controller_interface::Controller
 
   bool write_commands() {
     const auto &q_out = source_.q_out();
+    bool all_written = true;
     for (std::size_t index = 0; index < joints_.size(); ++index) {
       if (!command_interfaces_[index].set_value(q_out[static_cast<Eigen::Index>(index)])) {
         RCLCPP_ERROR_THROTTLE(
             get_node()->get_logger(), *get_node()->get_clock(), 1000,
             "Failed to write the position command for joint '%s'.", joints_[index].c_str());
-        return false;
+        all_written = false;
       }
     }
-    return true;
+    return all_written;
   }
 
   void warn_about(std::uint32_t events) {
@@ -345,7 +332,7 @@ class FRIPositionPassthroughController : public controller_interface::Controller
   }
 
   void publish_state() {
-    if (!state_publisher_ || !state_publisher_->trylock()) {
+    if (!state_publisher_->trylock()) {
       return;
     }
     auto &data = state_publisher_->msg_.data;
@@ -414,7 +401,7 @@ class ZeroEffortController : public controller_interface::ControllerInterface {
   controller_interface::CallbackReturn on_activate(
       const rclcpp_lifecycle::State &) override {
     return write_zero_effort() ? controller_interface::CallbackReturn::SUCCESS
-                               : controller_interface::CallbackReturn::ERROR;
+                               : controller_interface::CallbackReturn::FAILURE;
   }
 
   controller_interface::CallbackReturn on_deactivate(
@@ -424,21 +411,22 @@ class ZeroEffortController : public controller_interface::ControllerInterface {
 
   controller_interface::return_type update(
       const rclcpp::Time &, const rclcpp::Duration &) override {
-    return write_zero_effort() ? controller_interface::return_type::OK
-                               : controller_interface::return_type::ERROR;
+    write_zero_effort();
+    return controller_interface::return_type::OK;
   }
 
  private:
   bool write_zero_effort() {
+    bool all_written = true;
     for (std::size_t index = 0; index < joints_.size(); ++index) {
       if (!command_interfaces_[index].set_value(0.0)) {
         RCLCPP_ERROR_THROTTLE(
             get_node()->get_logger(), *get_node()->get_clock(), 1000,
             "Failed to write zero effort for joint '%s'.", joints_[index].c_str());
-        return false;
+        all_written = false;
       }
     }
-    return true;
+    return all_written;
   }
 
   std::vector<std::string> joints_;
