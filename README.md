@@ -24,6 +24,13 @@ It comes up at REST. One strict switch of all four controllers goes from one sta
 passthrough with `zero_effort_controller` does not hold the arm: the arm sags, and with a tool that is not
 declared to Sunrise it falls.
 
+A failure of either ARMED controller ends at REST. When the update of one returns an error or throws, the
+controller manager deactivates both in that control cycle and activates `joint_trajectory_controller` and
+`zero_effort_controller`, their `fallback_controllers` in `config/controllers.yaml`: the torque overlay is
+zero and the position command is the measured position. When both fail in the same cycle, all four end
+inactive with the same two commands left in place, and REST comes back by the strict switch by hand of
+[step 7](#bringing-up-the-real-arm).
+
 ## What you need
 
 - A Linux x86-64 PC with [pixi](https://pixi.sh), cabled to the cabinet's X66 (KLI) port, with the address
@@ -226,7 +233,7 @@ The camera frame is the CAD value of the description, not a hand-eye measurement
 On lev-workstation, 2026-11-24, Jazzy, ROS domain 77 on loopback, mock hardware. No cabinet is on that
 machine.
 
-- **The position source law:** the 16 gtests of `test-controllers` pass.
+- **The position source law:** the 17 gtests of `test-controllers` pass, at the parameters the stack ships.
 - **Bringup:** `mock-loopback` comes up at REST: `joint_trajectory_controller`, `zero_effort_controller` and
   the broadcasters active, the passthrough and `cartesian_impedance_controller` inactive.
   `/lbr/joint_states` at 500 Hz, `/lbr/current_pose` and `/lbr/current_twist` at 250 Hz; while ARMED the
@@ -237,6 +244,17 @@ machine.
   state.
 - **A refused activation:** with `position_source` set to another value, arming fails and leaves all four
   controllers inactive, and the strict switch by hand brings REST back.
+- **A failed update while ARMED:** shown with a stand-in for crisp's controller, built for this check
+  only: a controller that claims the seven effort interfaces, writes 0.5 Nm and fails its update when
+  told to, loaded as `cartesian_impedance_controller`, and the passthrough built to fail the same way.
+  Either of the two returning an error or throwing ends at REST in the cycle of the failure: the
+  controller manager deactivates the other one too, the passthrough's `on_deactivate` runs, the effort
+  commands go from 0.5 Nm to zero and the position command stays where the mock arm is.
+  `crisp_session.py` then shows `cell: REST` and arms again. The passthrough failing under crisp's
+  `cartesian_impedance_controller`, with a target moving, ends the same way. Without
+  `fallback_controllers` only the failed controller goes inactive: the stand-in's 0.5 Nm stays in the
+  effort commands after it fails, and it runs on after the passthrough fails. Both failing in one cycle
+  leaves all four inactive, the effort commands at zero.
 - **Session:** `crisp_session.py` prints the state, and `/lbr/target_pose` has no publisher while it or a
   `--switch` runs; `--home --home-file` brings the mock arm to the file's joints, with one publisher on
   the topic during the move; `--switch` goes REST, ARMED, REST with one strict switch each way, a switch
@@ -253,9 +271,12 @@ machine.
 Not checked:
 
 - This revision has not run on the arm.
+- A failed update on the arm.
+- crisp's `cartesian_impedance_controller` failing its update. The one error it returns is for a
+  `nullspace.projector_type` that its parameter validation refuses.
 - The passthrough holding the last finite position of a joint whose state is not finite, and either
   controller going on after a command write that failed: the mock produces neither.
 - How a teleoperated target behaves with the IK of the target as the position command.
-- The Sunrise applications in `sunrise/` are not compiled here: there is no Sunrise SDK on Linux.
+- `sunrise/FRITorqueDriver.java` is not compiled here: there is no Sunrise SDK on Linux.
 - `hardware-umi`, and the hardware-only parts of the launch: the FRI broadcasters, the wrench estimate and
   the torque relay.

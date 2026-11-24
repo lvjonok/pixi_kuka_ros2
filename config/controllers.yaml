@@ -21,8 +21,11 @@
     force_torque_broadcaster:
       type: force_torque_sensor_broadcaster/ForceTorqueSensorBroadcaster
 
+    # ros2_control reads fallback_controllers here, beside type. When the controller's update
+    # fails, it deactivates it and what holds the commands of the two named, and activates them.
     fri_position_passthrough_controller:
       type: pixi_kuka_ros2/FRIPositionPassthroughController
+      fallback_controllers: [joint_trajectory_controller, zero_effort_controller]
 
     # The name is fixed: crisp_py's JointTrajectoryControllerClient hardcodes the action
     # "joint_trajectory_controller/follow_joint_trajectory".
@@ -40,6 +43,7 @@
 
     cartesian_impedance_controller:
       type: crisp_controllers/CartesianController
+      fallback_controllers: [joint_trajectory_controller, zero_effort_controller]
 
 /**/estimated_wrench_interface:
   ros__parameters:

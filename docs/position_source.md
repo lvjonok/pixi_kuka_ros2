@@ -108,6 +108,13 @@ At deactivation the measured position is written into the position command. ARME
 up to the gap from the arm, and REST would hold that spring torque; with the measured position REST holds
 the arm where it stands.
 
+The controller manager goes from ARMED to REST by itself when the update of this controller or of
+`cartesian_impedance_controller` returns an error or throws: `joint_trajectory_controller` and
+`zero_effort_controller` are the `fallback_controllers` of both in `config/controllers.yaml`. It
+deactivates both ARMED controllers, this one as above, and activates the two in the same control cycle.
+The update of this controller returns no error: a position state it cannot read keeps its last value, a
+command it cannot write is logged, and it goes on.
+
 ## State
 
 `/lbr/fri_position_passthrough_controller/state` is a `std_msgs/Float64MultiArray`, published every update

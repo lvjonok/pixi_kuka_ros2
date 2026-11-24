@@ -290,7 +290,8 @@ What holds for this stack in every operating mode.
   `external_torque_safety_check: true` in `lbr_system_config.yaml`, and LBR-Stack's
   `safe_stop` command guard, are software on a general-purpose Linux box speaking UDP.
   They are useful. They are not safety-rated and must never be credited as a mitigation
-  in the risk assessment.
+  in the risk assessment. The same holds for the controller manager's return to REST when the
+  update of an ARMED controller fails ([`position_source.md`](position_source.md#the-law)).
 - **Sunrise's joint stiffness is part of the safety picture.** `FRITorqueDriver` runs 1000 Nm/rad
   on A1 to A3 and 500 on A4 to A7 ([`sunrise_setup.md`](sunrise_setup.md#sunrise-joint-stiffness)).
   Lowering it toward zero would leave the arm held only by ROS-side torque commands. A change of
