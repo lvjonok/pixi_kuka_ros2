@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Republish KUKA's external-torque estimate from lbr_state as a plain JointState.
+"""Republish KUKA's external-torque estimate from lbr_state as a sensor_msgs/JointState.
 
-Started by crisp_hardware.launch.py. lbr_fri_idl exists only in this workspace, so a recorder in
-another environment (lerobot_robot_crisp) reads kuka_external_torque instead: sensor_msgs/JointState,
-effort = LBRState.external_torque in Nm, names lbr_A1..A7.
+lbr_fri_idl is built only in this workspace; a reader in another environment takes
+kuka_external_torque: effort is LBRState.external_torque in Nm, names lbr_A1 to lbr_A7.
 """
 
 import rclpy
@@ -15,9 +14,8 @@ NAMES = [f"lbr_A{i}" for i in range(1, 8)]
 
 
 def main() -> None:
-    """Relay until interrupted."""
     rclpy.init()
-    node = rclpy.create_node("kuka_ext_torque_relay")  # namespace from the launch file
+    node = rclpy.create_node("kuka_ext_torque_relay")
     pub = node.create_publisher(JointState, "kuka_external_torque", qos_profile_sensor_data)
 
     def relay(msg: LBRState) -> None:
