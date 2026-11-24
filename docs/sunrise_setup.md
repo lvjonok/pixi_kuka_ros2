@@ -286,12 +286,6 @@ tuning tweak.
 Checked on the arm, 2026-10-25, at REST: the external torque Sunrise estimates is 1000 Nm/rad on
 A1 to A3 and 500 on A4 to A7 times the distance of the joint from its commanded position.
 
-## The other file in `sunrise/`
-
-[`sunrise/LBRServerJointImpedance.java`](../sunrise/LBRServerJointImpedance.java) is a variant of
-lbr_fri_ros2_stack's `LBRServer` that asks for a stiffness and a damping preset in two more
-dialogs. It has not been compiled, and nothing here is written for it.
-
 ## Network caveat
 
 A 2 ms FRI send period on a switch shared with general lab traffic is exposed to
