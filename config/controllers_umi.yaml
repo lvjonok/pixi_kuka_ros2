@@ -1,35 +1,14 @@
-# Overlay on controllers.yaml for launch `tool:=umi`: the Cartesian endpoint IS the wrist camera.
+# Overlay on controllers.yaml for launch tool:=umi: the Cartesian endpoint is the wrist camera,
+# lbr_umi_camera, so /lbr/current_pose and /lbr/target_pose are camera poses.
 #
-# Loaded AFTER controllers.yaml, so only the keys below change. With it the controller tracks
-# `lbr_umi_camera` and `pose_broadcaster` publishes /lbr/current_pose as the camera pose, which
-# is what the Panda cell does with `panda_umi_camera` and what a policy trained on hand-held
-# camera poses composes its SE(3)-relative chunks onto -- no flange conjugation anywhere.
+# Nothing that speaks lbr_link_ee may command /lbr/target_pose under this overlay: it would put
+# the camera where it meant the flange, about 90 mm and 25 deg away.
 #
-# The frame comes from iris_robots_description's iiwa14_umi.urdf.xacro (mount_clock 135 deg,
-# observed 21 Sep 2026). Nominally 90.5 mm from lbr_link_ee: t = (-81.6, -1.5, +39.1) mm, and
-# the optical axis tilted 25 deg off the flange axis. That is a CAD number, not a hand-eye
-# measurement; nothing here has checked it against the physical camera.
-#
-# EVERY OTHER CLIENT OF /lbr/target_pose SPEAKS lbr_link_ee: iiwa-next's excitation player,
-# haply_teleop_bridge.py, crisp_session.py. Under this overlay each of them would be commanding
-# the camera to where it meant the flange -- a 90 mm displacement and a 25 deg rotation that no
-# check of theirs can see. Excitation and teleop sessions run with tool:=none.
-#
-# The wrench estimator ends at the tweezer blade tips (25 Sep 2026), for the Haply's force
-# feedback through lerobot_robot_crisp: contact happens there, so a KDL chain ending there
-# splits tau_ext into force and moment about the point that is actually touched.
-# `lbr_umi_tweezer_tip` is fixed to lbr_umi_camera with the SAME orientation (iris_robots_description
-# umi_gripper.xacro), so the force can be rotated into the base by the measured camera pose;
-# lerobot_pickplace's kuka_cell readback checks that the two frames share axes. iiwa_next records
-# excitation with tool:=none and never loads this overlay.
-#
-# The per-axis force thresholds are a dead-zone the estimator applies BEFORE any bias a consumer
-# subtracts, so at 2 N a 3 N contact reads 1 N and a 1.9 N one reads nothing. The dead-zone belongs
-# after the bias, in the consumer (the Haply's deadband_n). Force only: the Haply renders 3 DoF,
-# and the torque thresholds stay controllers.yaml's.
-#
-# `damping` stays controllers.yaml's 0.2 until lerobot_pickplace runbook S2.4 measures it (a 10 mm
-# press into a rigid block should read ~13 N; 0.2 is expected ~30 % low).
+# The frame is iris_robots_description's CAD value, not a hand-eye measurement.
+
+# The wrench is estimated at the tweezer tips, where contact happens; lbr_umi_tweezer_tip has
+# lbr_umi_camera's orientation. The estimator applies its force thresholds as a dead zone before
+# a consumer can subtract a bias, so they are zero here and the dead zone is the consumer's.
 /**/estimated_wrench_interface:
   ros__parameters:
     wrench_estimator:
@@ -52,34 +31,13 @@
 
 /**/fri_position_passthrough_controller:
   ros__parameters:
-    # ik_target solves for the frame crisp tracks: the same pose on /lbr/target_pose.
     end_effector_frame: lbr_umi_camera
 
 /**/cartesian_impedance_controller:
   ros__parameters:
     end_effector_frame: lbr_umi_camera
 
-    # Tuned 26 Sep 2026 for Haply teleop by replaying one teleoperated trajectory under each set
-    # (scripts/track_tune.py; config/tune/README.md has every sweep). controllers.yaml's
-    # 1300/84, 60/15.5 (100/20 here before) trailed the target by 160 ms in position and 290 ms
-    # in rotation. Lag ~= (d + hidden) / k, the hidden part being the LBRServer joint-impedance
-    # damping under the FRI torque overlay (lowered 0.7 -> 0.3 on the robot controller the same
-    # day) and friction. Stiffer and less damped (2500/60, 300/10) replayed at 65 / 75 ms but on
-    # the arm was erratic and a rapid stroke tripped the driver's velocity guard, so damping is
-    # given back: this set felt right to the operator (config/tune/feel_k2500_d110_r250_d20_f09).
-    #
-    # Damping then raised again at the operator's request (110 -> 140, 20 -> 25), for a calmer,
-    # safer arm with force feedback on; by the sweep fit that costs ~12 ms / ~20 ms of lag.
-    #
-    # Translation stiffened 2500/140 -> 4000/200 the same evening, after the first gripper
-    # session found small hand movements dead: FRI torque mode leaves ~15 N of joint friction at
-    # the tool that the spring must overcome before the arm moves, so it held 6.0 mm off a still
-    # target and answered 1-3 mm steps 405 ms late (sweep 6b, steps1). 4000: 3.5 mm, 130 ms,
-    # stable (sweep 7). 5000 gained little more and doubles the contact force per mm; 450/38 in
-    # rotation oscillated the wrist, so rotation stays 250/25.
-    #
-    # Rotation above 100 needs patches/crisp_controllers-rotational-stiffness-ceiling.patch:
-    # variable_max_stiffness.rotational was validated to [0, 100] and clamps k_rot.
+    # Rotational stiffness above 100 needs patches/crisp_controllers-rotational-stiffness-ceiling.patch.
     task:
       k_pos_x: 4000.0
       k_pos_y: 4000.0
@@ -96,11 +54,7 @@
     variable_max_stiffness:
       translational: 4000.0
       rotational: 250.0
-    # The Haply target arrives in 30 Hz steps of up to 8 mm; at this stiffness each was a kick.
-    # EMA weight on the PREVIOUS desired pose per 2 ms cycle (launch 0.1): 0.9 ramps a step over
-    # ~20 ms, which is ~20 ms of lag.
     filter:
       target_pose: 0.9
-    # controllers.yaml turned limit_error on for the glove teleop (21 Oct 2026, error_clip 0.02 m /
-    # 0.05 rad). At this k that would be an 80 N / 12.5 Nm cap no UMI run was tuned for: off, as before.
+    # Off: error_clip does not bound the task force under this overlay.
     limit_error: false

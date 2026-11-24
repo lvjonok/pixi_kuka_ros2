@@ -19,8 +19,6 @@ bool finite_and_at_least(double value, double minimum) {
   return std::isfinite(value) && value >= minimum;
 }
 
-// Copies a per-joint parameter; false (with *error) on a wrong size or a value below `minimum`
-// (strictly above it when `strict`).
 bool per_joint(const std::vector<double> &values, std::size_t joint_count, const char *name,
                double minimum, bool strict, Eigen::VectorXd *out, std::string *error) {
   if (values.size() != joint_count) {
@@ -161,7 +159,7 @@ bool PositionSource::configure(std::size_t joint_count, const PositionSourcePara
 
   const auto n = static_cast<Eigen::Index>(joint_count);
   if (params.mode == PositionSourceMode::kMeasured) {
-    // Unused: measured never clamps, so a config written for another arm still passes through.
+    // measured never clamps, so a config sized for another arm still passes.
     max_step_.setZero(n);
     gap_.setZero(n);
   } else {
@@ -216,7 +214,6 @@ bool PositionSource::configure(std::size_t joint_count, const PositionSourcePara
       }
     }
     if (!kinematics_error_.empty()) {
-      // Only ik_target uses the margin; the other modes still run.
       if (params.mode == PositionSourceMode::kIkTarget) {
         *error = kinematics_error_ + ".";
         return false;
@@ -262,7 +259,6 @@ void PositionSource::update(const Eigen::VectorXd &q_meas, double dt,
   step_clamped_.setZero();
 
   if (params_.mode == PositionSourceMode::kMeasured) {
-    // Today's behaviour, bit for bit: no filter, no clamp.
     q_out_ = q_meas;
     q_ik_ = q_meas;
     stale_ = false;
@@ -278,9 +274,7 @@ void PositionSource::update(const Eigen::VectorXd &q_meas, double dt,
   }
 
   if (!ik) {
-    // q_out += a (q_meas - q_out), a = 1 - exp(-dt/tau): the exact discretisation of a
-    // first-order lag at any dt (Drake's pole 0.8816 per 1 ms is tau 7.94 ms). The low-pass
-    // integrates on the output itself.
+    // a = 1 - exp(-dt/tau): the exact discretisation of a first-order lag at any dt.
     const double tau = params_.lag_time_constant_s;
     const double alpha = tau > 0.0 ? -std::expm1(-dt / tau) : 1.0;
     proposal_ = q_out_ + alpha * (q_meas - q_out_);
@@ -304,8 +298,6 @@ void PositionSource::update(const Eigen::VectorXd &q_meas, double dt,
       raw_target_.position = new_target->position;
       raw_target_.orientation.coeffs() = new_target->orientation.coeffs() / norm;
       if (!have_target_) {
-        // The first target after activation, or after a fallback: the filter starts on it and
-        // IK restarts from where the arm is.
         filtered_position_ = raw_target_.position;
         filtered_orientation_ = raw_target_.orientation;
         q_ik_ = q_meas;
@@ -410,7 +402,6 @@ void PositionSource::clamp_and_step(const Eigen::VectorXd &q_meas,
       value = q_meas[index] + gap_[index];
       gap_clamped_[index] = 1.0;
     }
-    // Then |q_out - q_out_prev| <= max_joint_step_rad.
     const double step = value - q_out_[index];
     if (step > max_step_[index]) {
       value = q_out_[index] + max_step_[index];

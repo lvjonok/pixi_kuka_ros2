@@ -1,105 +1,53 @@
-# Local patches to imported sources
+# Patches to crisp_controllers
 
-`src/` is gitignored and `scripts/import_sources.sh` clones each dependency itself, so a
-change made inside one of those checkouts is tracked nowhere and disappears the moment the
-directory is removed and re-imported. Anything this cell depends on that is not upstream
-lives here as a patch, with the upstream commit it applies to named in its own header.
+`scripts/import_sources.sh` clones `crisp_controllers` at `0279dc8` (the pin is in
+`repos/repos-fri-1.17.yaml`) and puts these four diffs on it with `git apply`, in the order
+below. Each one applies on the one before it. A checkout that already has them is left alone.
 
-`import_sources.sh` only clones when `.git` is absent, so re-running it does **not** clobber
-an existing checkout — the risk is a deleted or freshly cloned `src/`, not a re-import.
+They change `CartesianController` and `CartesianAdmittanceController`.
 
-## crisp_controllers-introspection.patch
+## 1. crisp_controllers-introspection.patch
 
-Applies to `crisp_controllers` at upstream `0279dc8`, cloned depth-1 from the default branch
-(`import_sources.sh:62`) — so the base is not pinned and this patch may need rebasing after
-upstream moves.
+The controller publishes nothing, so ros2_control introspection is how its terms are read.
+Upstream registers `tau_task`, `tau_desired`, `error`, `target_*`, `q_target` and `q_ref` behind
+`enable_introspection`.
 
-`CartesianController` creates no publishers, so ros2_control introspection is the only way to
-read what it is tracking. Upstream already exposes `tau_task`, `tau_desired`, `error`,
-`target_*`, `q_target` and `q_ref` behind `enable_introspection`. The patch adds the rest of
-the control law — `q_filtered`, `dq_filtered`, `dq_ref`, `tau_nullspace`, `tau_secondary`,
-`tau_joint_limits`, `tau_wrench`, `tau_friction`, `tau_coriolis`, `tau_gravity`,
-`desired_position_*`, `desired_orientation_*`, `target_wrench_*` — so that a learned
-external-torque model can be ablated against each input separately rather than their sum.
+- The patch registers the rest of the control law: `q_filtered`, `dq_filtered`, `dq_ref`,
+  `tau_nullspace`, `tau_secondary`, `tau_joint_limits`, `tau_wrench`, `tau_friction`,
+  `tau_coriolis`, `tau_gravity`, `desired_position_*`, `desired_orientation_*` and
+  `target_wrench_*`. They are members the controller already updates, so the realtime loop does
+  no more work.
+- Upstream registers `tau_desired` and `tau_joint_limits` by the address of an Eigen vector that
+  is later assigned by value, which frees the buffer the address points into: those two
+  channels then publish freed memory. The patch copies both into arrays that stay in place and
+  registers those.
 
-All of them are existing members updated in place, so the cost is a pointer registration and
-nothing in the realtime loop.
+Registration runs in `on_configure` and the entries publish only while the controller is
+active, so `enable_introspection` is set in `config/controllers.yaml`; setting it on a
+configured controller does nothing.
 
-Verified on mock hardware: **126 channels** register and publish at **499.98 Hz**, the same
-tick rate as `/lbr/lbr_state`, which is what lets the two streams be aligned tick-for-tick.
+## 2. crisp_controllers-activate-clears-targets.patch
 
-Introspection entries publish **only while the controller is active**, and registration runs
-in `on_configure` — so `enable_introspection` must be set in `config/controllers.yaml` before
-the controller is configured. Setting the parameter on an already-configured controller does
-nothing.
+Safety. The target subscriptions live from `on_configure`, and upstream clears the
+new-target flags only there. A pose, joint or wrench target published while the controller is
+inactive then survives activation and replaces the measured pose `on_activate` has just
+latched: on the first update the arm is driven to a stale target. A crisp_py `Robot` publishes
+its target at 50 Hz from the pose it started at, so any client that stays connected across a
+joint move leaves such a target behind.
 
-To re-apply after a fresh import:
+The patch clears the pose, joint and wrench flags and zeroes the wrench target in
+`on_activate`. A target that arrives after activation is applied as before.
 
-```bash
-git -C src/crisp_controllers am < patches/crisp_controllers-introspection.patch
-pixi run -e jazzy colcon build --base-paths . src --packages-select crisp_controllers \
-  --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
-```
+## 3. crisp_controllers-rotational-stiffness-ceiling.patch
 
-## crisp_controllers-activate-clears-targets.patch
+`variable_max_stiffness.rotational` clamps `task.k_rot_*`, and upstream validates it to
+[0, 100] Nm/rad. The patch raises the bound to 1000. `config/controllers_umi.yaml` sets 250,
+outside upstream's bound.
 
-Applies on top of the introspection patch (upstream `0279dc8` + `fd64d0a` + `006d34a`).
+## 4. crisp_controllers-activate-zeroes-torque.patch
 
-**Safety.** The target subscriptions live from `on_configure`, and the `new_target_*` flags were
-cleared only there. A target published while the controller was inactive therefore survived
-activation and replaced the measured pose `on_activate` had just latched, on the first
-`update()`. `crisp_session.py --home` runs a crisp_py `Robot`, which publishes its target pose and
-joints at 50 Hz from the pose it STARTED at; arming the Cartesian controller after homing then
-yanked the arm back to its pre-homing pose. On 25 Sep 2026 that hit FRI's velocity guard on A2
-within milliseconds of activation and dropped the session with the camera 37 cm lower.
-
-Both `CartesianController` and `CartesianAdmittanceController` now clear the pose, joint and
-wrench flags and zero the wrench target in `on_activate`. A target that arrives after
-activation is a real command and is applied as before.
-
-Re-apply after a fresh import, after the introspection patch:
-
-```bash
-git -C src/crisp_controllers am < patches/crisp_controllers-activate-clears-targets.patch
-pixi run -e jazzy colcon build --base-paths . src --packages-select crisp_controllers \
-  --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
-```
-
-## crisp_controllers-rotational-stiffness-ceiling.patch
-
-Applies on top of the activation patch.
-
-`variable_max_stiffness.rotational` clamps `task.k_rot_*` (whose own bound is 5000) and was
-validated to [0, 100]. On the iiwa14 with the UMI, rotation then trails its target by ~200 ms
-whatever the damping: `scripts/track_tune.py` sweeps 2-3 (26 Sep 2026) fit
-lag ~= (d_rot + ~11 hidden) / k_rot, the hidden part being below crisp. The ceiling is now 1000.
-Nothing changes until a config or a `set_parameters` raises it; controllers_umi.yaml still
-launches at 100.
-
-Re-apply after a fresh import, after the activation patch:
-
-```bash
-git -C src/crisp_controllers am < patches/crisp_controllers-rotational-stiffness-ceiling.patch
-pixi run -e jazzy colcon build --base-paths . src --packages-select crisp_controllers \
-  --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
-```
-
-## crisp_controllers-activate-zeroes-torque.patch
-
-Applies on top of the rotational-ceiling patch.
-
-**Safety.** `tau_previous` seeds both the torque-rate limit and the output filter, and only
-`on_configure` zeroed it, so each activation started from the torque the previous one ended on.
-With `filter.output_torque` 0.2 (weight 0.8 on the previous value per cycle) that stale torque
-was replayed for tens of milliseconds. 26 Sep 2026: after a session that ended pressing a block,
-lerobot_pickplace's `kuka_cell.py arm` refused twice -- the camera moved 7-11 mm within 0.3 s of
-arming. Both controllers now zero it in `on_activate`. Zero is the neutral overlay: the robot
-controller compensates gravity under the FRI torque overlay.
-
-Re-apply after a fresh import, after the rotational-ceiling patch:
-
-```bash
-git -C src/crisp_controllers am < patches/crisp_controllers-activate-zeroes-torque.patch
-pixi run -e jazzy colcon build --base-paths . src --packages-select crisp_controllers \
-  --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
-```
+Safety. `tau_previous` seeds the torque-rate limit and the output filter, and upstream zeroes
+it only in `on_configure`, so an activation starts from the torque the last one ended on and
+the filter replays it for tens of milliseconds: the arm moves at the moment it is armed. The
+patch zeroes it in `on_activate`. Zero is the neutral overlay, because Sunrise compensates
+gravity under the FRI torque overlay.

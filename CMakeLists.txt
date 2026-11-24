@@ -58,9 +58,8 @@ install(PROGRAMS scripts/kuka_ext_torque_relay.py DESTINATION lib/${PROJECT_NAME
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
 
-  # The arm the cell runs: lbr_ros2_control's iiwa14.xacro, the robot_description of
-  # crisp_mock/crisp_hardware with tool:=none (its limits are the description package's minus
-  # lbr_ros2_control's margin). Generated at configure time, so a broken xacro fails the build.
+  # The robot_description of crisp_hardware.launch.py with tool:=none: lbr_ros2_control's
+  # iiwa14.xacro, whose limits are the description package's minus lbr_ros2_control's margin.
   find_program(XACRO_EXECUTABLE xacro REQUIRED)
   find_file(PIXI_KUKA_IIWA14_XACRO iiwa14.xacro
     PATHS ENV AMENT_PREFIX_PATH

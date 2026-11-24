@@ -22,7 +22,7 @@ vcstool = "*"
 libgl-devel = "*"
 
 [environments]
-jazzy = { features = ["jazzy", "dev"] }
+jazzy = { features = ["jazzy"] }
 
 [feature.jazzy]
 channels = ["https://prefix.dev/robostack-jazzy"]
@@ -37,67 +37,22 @@ ros-jazzy-ros2-control = "*"
 ros-jazzy-ros2-controllers = "*"
 ros-jazzy-xacro = ">=2.0.13,<3"
 
+[feature.jazzy.pypi-dependencies]
+crisp-python = ">=3.0.0,<4"
+# controller_manager's spawner imports it; the conda package does not depend on it.
+filelock = ">=3.20,<4"
+viser = { version = ">=0.2", extras = ["urdf"] }
+
 [feature.jazzy.tasks]
 sources = "bash scripts/import_sources.sh"
 build = { cmd = "colcon build --base-paths . src --packages-up-to pixi_kuka_ros2 --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -Wno-dev", depends-on = ["sources"] }
 setup = { depends-on = ["build"] }
-# This package's unit tests (test/: the position_source law, no ROS graph). Rebuilds only
-# pixi_kuka_ros2, with BUILD_TESTING=ON, against the dependencies `build` installed (run that
-# first); the next `build` puts BUILD_TESTING back to OFF. Fails when a test fails.
 test-controllers = "colcon build --base-paths . src --packages-select pixi_kuka_ros2 --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -Wno-dev && colcon test --base-paths . src --packages-select pixi_kuka_ros2 --event-handlers console_direct+ && colcon test-result --test-result-base build/pixi_kuka_ros2 --verbose"
-# The operator scripts' decision logic (test/*.py: position_source.py, overlay_torque.py) against
-# fakes. No build, no ROS graph.
-test-scripts = "python -m pytest test"
-mock = "ros2 launch pixi_kuka_ros2 crisp_mock.launch.py"
-mock-loopback = "env CYCLONEDDS_URI=file://$PWD/config/cyclonedds_loopback.xml ros2 launch pixi_kuka_ros2 crisp_mock.launch.py"
 hardware = "ros2 launch pixi_kuka_ros2 crisp_hardware.launch.py"
-# The UMI fitted and the Cartesian endpoint at its camera. Nothing that speaks lbr_link_ee may
-# run against it: see config/controllers_umi.yaml.
 hardware-umi = "ros2 launch pixi_kuka_ros2 crisp_hardware.launch.py tool:=umi"
-mock-umi = "env CYCLONEDDS_URI=file://$PWD/config/cyclonedds_loopback.xml ros2 launch pixi_kuka_ros2 crisp_mock.launch.py tool:=umi"
+mock-loopback = "env ROS_DOMAIN_ID=77 CYCLONEDDS_URI=file://$PWD/config/cyclonedds_loopback.xml ros2 launch pixi_kuka_ros2 crisp_mock.launch.py"
 controllers = "ros2 control list_controllers -c /lbr/controller_manager"
 interfaces = "ros2 control list_hardware_interfaces -c /lbr/controller_manager"
-session = "env CYCLONEDDS_URI=file://$PWD/config/cyclonedds_loopback.xml python scripts/crisp_session.py"
-# What the passthrough writes into FRI's position field (docs/position_source.md): `status`, or
-# `set <measured|lagged|ik_target> [--param name=value ...]`, at REST only. Moves nothing.
-# Talks to whatever stack the shell's DDS settings reach: on the cell host that is the hardware
-# stack (ROS_DOMAIN_ID 42, the LAN interface). Against the loopback mock use position-source-mock.
+session = "env ROS_DOMAIN_ID=77 CYCLONEDDS_URI=file://$PWD/config/cyclonedds_loopback.xml python scripts/crisp_session.py"
 position-source = "python scripts/position_source.py"
 position-source-mock = "env ROS_DOMAIN_ID=77 CYCLONEDDS_URI=file://$PWD/config/cyclonedds_loopback.xml python scripts/position_source.py"
-# Read-only viser page: the estimated contact force at the tweezer tips and tau_ext per joint.
-contact-view = "python scripts/contact_view.py"
-# Read-only: joint speeds as lbr_fri_ros2's CommandGuard computes them, naming the joint.
-guard-watch = "python scripts/guard_watch.py"
-
-[feature.dev.pypi-dependencies]
-crisp-python = ">=3.0.0,<4"
-filelock = ">=3.20,<4"
-pytest = "*"
-ruff = "*"
-# The dataset recorder for the external-torque experiment. It lives in its own repository
-# because it is an experiment, not part of the cell — but it has to run HERE: this is the
-# only environment carrying rclpy, lbr_fri_idl and pal_statistics_msgs together, and the
-# recorder needs all three (FRI state, plus CRISP introspection for the command channel).
-#
-# Editable and by path rather than pinned, because the recorder is under active development
-# against this cell and a pin would put a release cycle between finding a recording bug and
-# fixing it. Pin it once sessions are being kept: a dataset whose recorder cannot be
-# identified is a dataset whose columns cannot be explained.
-iiwa_next = { path = "../../iiwa_next", editable = true }
-# Parquet writer for the same. Not otherwise used by this workspace.
-pyarrow = ">=15"
-# The live view for an autonomous excitation run: the plan drawn as a translucent ghost beside the
-# arm's measured configuration. It belongs HERE and not only on the laptop, because the thing it
-# exists to show is the *gap* between those two, and the measured half only exists on the machine
-# talking to the cell. A PyPI wheel rather than conda: viser is pure Python with a bundled web
-# client, so it has nothing to gain from the solver that also has to satisfy robostack, and every
-# package added to that solve is another chance to move the ROS pins. The `urdf` extra pulls
-# yourdfpy, without which `ViserUrdf` raises at construction -- so the view would die at exactly
-# the moment someone started a run in order to watch it.
-viser = { version = ">=0.2", extras = ["urdf"] }
-# CPU torch, so `iiwa-next live` can run the trained estimator beside the arm and show the
-# residual while someone pushes it. A PyPI wheel, never conda: the wheels vendor their own CUDA
-# and MKL and depend only on numpy, which keeps torch out of the solver that also has to satisfy
-# robostack. CPU because one 50-step window through a 300k-parameter net takes well under a
-# millisecond, and the estimator runs at 100 Hz.
-torch = { version = ">=2.4", index = "https://download.pytorch.org/whl/cpu" }

@@ -1,18 +1,14 @@
 package lbr_fri_ros2;
 
 // LBRServer with the control mode fixed to joint impedance and the client command mode to TORQUE,
-// plus a stiffness and a damping preset (docs/position_source.md, "Sunrise side"). Installed
-// BESIDE the stock LBRServer, which stays untouched: same package, same FRI dialogs, same session.
+// plus a stiffness and a damping preset. Installed beside the stock LBRServer: same package, same
+// FRI dialogs. The first entry of each preset dialog is what this cabinet's LBRServer runs.
 //
-// NOT COMPILED HERE. There is no Sunrise SDK on Linux; this file was written against the API
-// calls LBRServer.java (lbr-stack/fri ros2-fri-1.15, server_app/) and Drake's
-// DrakeFRITorqueDriver.java (sunrise_1.14) already make, and must be compiled by Sunrise.Workbench
-// when it is synchronised into the project loaded from the cabinet (docs/sunrise_setup.md).
+// It cannot be compiled outside Sunrise.Workbench (there is no Sunrise SDK on Linux), which
+// compiles it when it is synchronised to the cabinet (docs/sunrise_setup.md).
 //
-// The first entry of each preset dialog reproduces today's LBRServer: 200 Nm/rad on every joint,
-// damping 0.3 (this cabinet's copy, lowered from the 0.7 default on 26 Sep 2026). Whatever is
-// chosen here, sunrise_joint_stiffness of fri_position_passthrough_controller must equal it: FRI
-// does not report the stiffness, and the controller's gap clamp is computed from that parameter.
+// sunrise_joint_stiffness of fri_position_passthrough_controller must equal the stiffness chosen
+// here: FRI does not report it, and the controller's gap clamp is computed from that parameter.
 
 import static com.kuka.roboticsAPI.motionModel.BasicMotions.positionHold;
 
@@ -28,17 +24,15 @@ import com.kuka.roboticsAPI.motionModel.controlModeModel.*;
 import com.kuka.connectivity.fastRobotInterface.*;
 
 public class LBRServerJointImpedance extends RoboticsAPIApplication {
-	// members
 	private LBR lbr_;
 	private Controller lbr_controller_;
 
-	// FRI parameters, as LBRServer
 	private String client_name_;
 	private String[] client_names_ = {"172.31.1.148", "192.170.10.1"};
 	private int send_period_;
-	private String[] send_periods_ = {"1", "2", "5", "10"};  // send period in ms
+	private String[] send_periods_ = {"1", "2", "5", "10"};
 
-	// joint stiffness presets [Nm/rad], A1..A7; index 0 is today's LBRServer
+	// Nm/rad, A1..A7
 	private String[] stiffness_names_ = {
 		"200 all (today)",
 		"500 all",
@@ -51,7 +45,7 @@ public class LBRServerJointImpedance extends RoboticsAPIApplication {
 	};
 	private double[] stiffness_;
 
-	// damping presets (Lehr's damping ratio, all joints); index 0 is this cabinet today
+	// Lehr's damping ratio, all joints
 	private String[] damping_names_ = {
 		"0.3 (today)",
 		"0.7 (KUKA default)",
@@ -65,11 +59,9 @@ public class LBRServerJointImpedance extends RoboticsAPIApplication {
 	private FRIJointOverlay fri_overlay_;
 
 	private JointImpedanceControlMode control_mode_;
-	private ClientCommandMode command_mode_ = ClientCommandMode.TORQUE;  // fixed
+	private ClientCommandMode command_mode_ = ClientCommandMode.TORQUE;
 
-	// methods
 	public void request_user_config() {
-		// send period
 		int id = getApplicationUI().displayModalDialog(
 				ApplicationDialogType.QUESTION,
 				"Select the desired FRI send period [ms]:",
@@ -78,7 +70,6 @@ public class LBRServerJointImpedance extends RoboticsAPIApplication {
 		send_period_ = Integer.valueOf(send_periods_[id]);
 		getLogger().info("Send period set to: " + send_period_);
 
-		// remote IP address
 		id = getApplicationUI().displayModalDialog(
 				ApplicationDialogType.QUESTION,
 				"Select your remote IP address:",
@@ -87,7 +78,6 @@ public class LBRServerJointImpedance extends RoboticsAPIApplication {
 		client_name_ = client_names_[id];
 		getLogger().info("Remote address set to: " + client_name_);
 
-		// joint stiffness
 		id = getApplicationUI().displayModalDialog(
 				ApplicationDialogType.QUESTION,
 				"Select the joint impedance stiffness [Nm/rad]. "
@@ -98,7 +88,6 @@ public class LBRServerJointImpedance extends RoboticsAPIApplication {
 		getLogger().info("Joint stiffness set to: " + stiffness_names_[id] + " = "
 				+ Arrays.toString(stiffness_) + " Nm/rad");
 
-		// joint damping
 		id = getApplicationUI().displayModalDialog(
 				ApplicationDialogType.QUESTION,
 				"Select the joint impedance damping (all joints):",
@@ -107,7 +96,6 @@ public class LBRServerJointImpedance extends RoboticsAPIApplication {
 		damping_ = damping_presets_[id];
 		getLogger().info("Joint damping set to: " + damping_names_[id] + " = " + damping_);
 
-		// control mode, fixed to joint impedance
 		control_mode_ = new JointImpedanceControlMode(
 				stiffness_[0], stiffness_[1], stiffness_[2], stiffness_[3],
 				stiffness_[4], stiffness_[5], stiffness_[6]
@@ -115,7 +103,6 @@ public class LBRServerJointImpedance extends RoboticsAPIApplication {
 		control_mode_.setDampingForAllJoints(damping_);
 		getLogger().info("Control mode set to: JOINT_IMPEDANCE_CONTROL (fixed)");
 
-		// command mode, fixed to TORQUE
 		getLogger().info("Client command mode set to: " + command_mode_.name() + " (fixed)");
 	}
 
@@ -146,7 +133,6 @@ public class LBRServerJointImpedance extends RoboticsAPIApplication {
 			}
 		});
 
-		// try to connect
 		try {
 			fri_session_.await(10, TimeUnit.SECONDS);
 		} catch (final TimeoutException e) {
@@ -162,16 +148,13 @@ public class LBRServerJointImpedance extends RoboticsAPIApplication {
 		lbr_controller_ = (Controller) getContext().getControllers().toArray()[0];
 		lbr_ = (LBR) lbr_controller_.getDevices().toArray()[0];
 
-		// set FRI parameters and the impedance presets
 		request_user_config();
 
-		// configure the FRI
 		configure_fri();
 	}
 
 	@Override
 	public void run() {
-		// run the FRI under the chosen joint impedance
 		getLogger().info("Holding position: stiffness " + Arrays.toString(stiffness_)
 				+ " Nm/rad, damping " + damping_ + ", command mode " + command_mode_.name());
 		lbr_.move(positionHold(control_mode_, -1, TimeUnit.SECONDS).addMotionOverlay(fri_overlay_));
@@ -180,18 +163,12 @@ public class LBRServerJointImpedance extends RoboticsAPIApplication {
 
 	@Override
 	public void dispose() {
-		// close connection
 		getLogger().info("Disposing FRI session.");
 		fri_session_.close();
 
 		super.dispose();
 	}
 
-	/**
-	 * main
-	 *
-	 * @param args
-	 */
 	public static void main(final String[] args) {
 		LBRServerJointImpedance app = new LBRServerJointImpedance();
 		app.runApplication();

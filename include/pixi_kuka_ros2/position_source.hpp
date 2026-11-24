@@ -1,8 +1,7 @@
 #pragma once
 
-// What FRIPositionPassthroughController writes into the FRI position field under the torque
-// overlay (docs/position_source.md). ROS-free so it can be unit-tested: the controller owns the
-// interfaces, the target subscription and the diagnostics; this owns the law.
+// The law of what FRIPositionPassthroughController writes into the FRI position field
+// (docs/position_source.md).
 
 #include <cstddef>
 #include <cstdint>
@@ -36,7 +35,7 @@ struct PositionSourceParams {
   double ik_damping = 0.01;
   double nullspace_gain = 0.05;
   double joint_limit_margin_rad = 0.05;
-  // One entry per joint. Unused, and not size-checked, in `measured`.
+  // One entry per joint; not read in `measured`.
   std::vector<double> max_joint_step_rad = std::vector<double>(7, 0.004);
   std::vector<double> sunrise_joint_stiffness = std::vector<double>(7, 200.0);
   std::vector<double> max_spring_torque_nm = {10.0, 10.0, 10.0, 8.0, 5.0, 5.0, 3.0};
@@ -50,32 +49,29 @@ struct PoseTarget {
 
 class PositionSource {
  public:
-  // Bits of events(): what the last update() fell back on, for the controller's warnings.
-  static constexpr std::uint32_t kTargetNonFinite = 1u << 0;  // a new target was rejected
-  static constexpr std::uint32_t kTargetTimedOut = 1u << 1;   // the target just went stale
-  static constexpr std::uint32_t kIkNonFinite = 1u << 2;      // IK produced NaN/Inf; restarted
-  static constexpr std::uint32_t kNoKinematics = 1u << 3;     // no model or a missing frame
-  static constexpr std::uint32_t kInvalidPeriod = 1u << 4;    // dt not finite and positive
+  // Bits of events(): what the last update() fell back on.
+  static constexpr std::uint32_t kTargetNonFinite = 1u << 0;
+  static constexpr std::uint32_t kTargetTimedOut = 1u << 1;
+  static constexpr std::uint32_t kIkNonFinite = 1u << 2;
+  static constexpr std::uint32_t kNoKinematics = 1u << 3;
+  static constexpr std::uint32_t kInvalidPeriod = 1u << 4;
 
-  // Not realtime. Builds the model `ik_target` integrates on from a URDF, every joint not in
-  // `joints` locked at its neutral value. Each of `joints` must be a 1-DoF joint of the URDF.
-  // On failure the source still runs `measured` and `lagged`; `ik_target` falls back.
+  // Not realtime. The model `ik_target` integrates on: the URDF with every joint not in `joints`
+  // locked at neutral. On failure `ik_target` falls back to the measured position.
   bool load_model(const std::string &urdf_xml, const std::vector<std::string> &joints,
                   std::string *error);
 
-  // Not realtime. Validates `params` for `joint_count` joints and preallocates; false with
-  // *error if a parameter is invalid. A missing frame, a base_frame that is not the model's world
-  // (crisp reads the target in the world frame) and, outside `ik_target`, a joint margin that
-  // leaves no range are not errors here: kinematics_ready() turns false and `ik_target` falls
-  // back to the measured position (kinematics_error() says why).
+  // Not realtime. False with *error if a parameter is invalid. A missing frame, a base_frame
+  // that is not the model's world and, outside `ik_target`, a joint margin that leaves no range
+  // are not errors: kinematics_ready() turns false and `ik_target` falls back to the measured
+  // position (kinematics_error() says why).
   bool configure(std::size_t joint_count, const PositionSourceParams &params, std::string *error);
 
-  // Realtime. q_out = q_ik = q_posture = q_meas, the filtered target cleared: until a target
-  // arrives the output is the measured position.
+  // Realtime. Until a target arrives the output is the measured position.
   void activate(const Eigen::VectorXd &q_meas);
 
-  // Realtime, no allocation. q_meas finite (the controller checks); dt in seconds;
-  // new_target is nullptr unless a target arrived since the previous update.
+  // Realtime, no allocation. q_meas must be finite; dt in seconds; new_target is nullptr unless
+  // a target arrived since the previous update.
   void update(const Eigen::VectorXd &q_meas, double dt, const PoseTarget *new_target);
 
   const PositionSourceParams &params() const { return params_; }
@@ -94,8 +90,7 @@ class PositionSource {
   bool stale() const { return stale_; }
   std::uint32_t events() const { return events_; }
 
-  // Forward kinematics of end_effector_frame in base_frame at q (controller joint order).
-  // Not realtime; for tests and tools. Requires kinematics_ready().
+  // Not realtime. end_effector_frame in base_frame at q; false unless kinematics_ready().
   bool forward_kinematics(const Eigen::VectorXd &q, PoseTarget *pose);
 
  private:
@@ -106,8 +101,8 @@ class PositionSource {
   PositionSourceParams params_;
   std::size_t joint_count_ = 0;
 
-  // Kinematics: a reduced model with exactly the controller's joints. idx_q_/idx_v_ map the
-  // controller's joint order into the model's configuration and tangent vectors.
+  // idx_q_/idx_v_: the controller's joint order to the model's configuration and tangent
+  // indices.
   bool model_loaded_ = false;
   bool kinematics_ready_ = false;
   std::string kinematics_error_;
@@ -120,11 +115,9 @@ class PositionSource {
   Eigen::VectorXd q_lower_;  // URDF limits minus the margin, controller order
   Eigen::VectorXd q_upper_;
 
-  // Per-joint limits.
   Eigen::VectorXd max_step_;
   Eigen::VectorXd gap_;
 
-  // State.
   Eigen::VectorXd q_out_;
   Eigen::VectorXd q_ik_;
   Eigen::VectorXd q_posture_;
@@ -138,7 +131,6 @@ class PositionSource {
   Eigen::Vector3d filtered_position_ = Eigen::Vector3d::Zero();
   Eigen::Quaterniond filtered_orientation_ = Eigen::Quaterniond::Identity();
 
-  // IK workspace, preallocated in configure().
   Eigen::VectorXd q_pin_;
   Eigen::VectorXd posture_pull_;  // model tangent order
   Eigen::VectorXd dq_;            // model tangent order

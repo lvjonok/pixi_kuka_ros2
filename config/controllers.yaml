@@ -1,15 +1,12 @@
-# Controller configuration for lbr-stack's default robot_name "lbr".
-#
-# The KUKA FRI torque command is a position command plus a torque overlay. CRISP
-# claims only the effort interfaces, so the position passthrough controller must
-# remain active while a CRISP controller is active. The zero-effort controller
-# is the safe counterpart used in atomic controller switches.
+# FRI's torque command is a joint position plus a torque overlay. CRISP claims only the effort
+# interfaces, so fri_position_passthrough_controller must be active whenever a CRISP controller
+# is. zero_effort_controller owns the effort interfaces otherwise.
 /**/controller_manager:
   ros__parameters:
     update_rate: 500
-    # LBR-Stack's safe-stop command guard remains authoritative. The Jazzy
-    # controller-manager limiter currently throws on GenericSystem's empty
-    # first-cycle optional and is therefore disabled here.
+    # ros2_control's command limiter throws on a command interface that is still empty in the
+    # first cycle, and the controller manager then deactivates the controller. lbr_fri_ros2's
+    # command guard checks every command either way.
     enforce_command_limits: false
 
     joint_state_broadcaster:
@@ -30,11 +27,8 @@
     fri_position_passthrough_controller:
       type: pixi_kuka_ros2/FRIPositionPassthroughController
 
-    # Point-to-point moves, used to reach the home configuration. It claims the
-    # same position command interfaces as the passthrough controller, so exactly
-    # one of the two may be active. See scripts/kuka_crisp.py::move_to_home.
-    # The name is fixed: crisp_py's JointTrajectoryControllerClient hardcodes the
-    # action as "joint_trajectory_controller/follow_joint_trajectory".
+    # The name is fixed: crisp_py's JointTrajectoryControllerClient hardcodes the action
+    # "joint_trajectory_controller/follow_joint_trajectory".
     joint_trajectory_controller:
       type: joint_trajectory_controller/JointTrajectoryController
 
@@ -99,28 +93,22 @@
       - lbr_A6
       - lbr_A7
 
-    # What the FRI position field carries under the torque overlay; Sunrise's joint spring
-    # (200 Nm/rad in LBRServer) is centred on it. docs/position_source.md has the law and the
-    # safety notes. Read at configure and at every activation (REST -> ARMED); the active mode is
-    # logged then. measured = the behaviour this controller always had; lagged and ik_target are
-    # under test on the mock and NOT validated on the cell.
+    # What the FRI position field carries under the torque overlay (docs/position_source.md);
+    # Sunrise's joint spring is centred on it. lagged and ik_target are not validated on the cell.
     position_source: measured
-    # lagged: first-order low-pass of the measured position (Drake's IIR is tau 7.94 ms).
     lag_time_constant_s: 0.008
-    # ik_target: crisp's target (/lbr/target_pose), the IK integrated on the controller's own q.
     target_topic: target_pose
-    end_effector_frame: lbr_link_ee  # = cartesian_impedance_controller's (controllers_umi.yaml)
+    # As cartesian_impedance_controller's end_effector_frame and filter.target_pose.
+    end_effector_frame: lbr_link_ee
     base_frame: lbr_link_0
-    target_filter: 0.9  # = cartesian_impedance_controller's filter.target_pose
+    target_filter: 0.9
     target_timeout_s: 0.1
     ik_damping: 0.01
     nullspace_gain: 0.05
     joint_limit_margin_rad: 0.05
-    # Every mode but measured: per-update change of the output (2 rad/s at 500 Hz), per joint.
-    # It gives way to the gap clamp when the arm itself moves faster.
     max_joint_step_rad: [0.004, 0.004, 0.004, 0.004, 0.004, 0.004, 0.004]
-    # |q_out - q_meas| <= max_spring_torque_nm / sunrise_joint_stiffness per joint: the torque
-    # Sunrise's spring may add. The stiffness is NOT read from the robot; it must match the app.
+    # Not read from the robot: it must be the Sunrise app's joint stiffness. |q_out - q_meas| is
+    # held under max_spring_torque_nm / sunrise_joint_stiffness.
     sunrise_joint_stiffness: [200.0, 200.0, 200.0, 200.0, 200.0, 200.0, 200.0]
     max_spring_torque_nm: [10.0, 10.0, 10.0, 8.0, 5.0, 5.0, 3.0]
 
@@ -139,10 +127,8 @@
     state_interfaces:
       - position
       - velocity
-    # The commanded position goes to FRI, which hands it to Sunrise's joint
-    # impedance controller at 200 Nm/rad. Tolerances are therefore on the
-    # impedance-tracked position, not on a stiff position servo, and a tight
-    # goal tolerance would abort moves that in fact arrived.
+    # Sunrise tracks the commanded position with a joint impedance, not a stiff servo: a tight
+    # goal tolerance would abort moves that arrived.
     constraints:
       stopped_velocity_tolerance: 0.02
       goal_time: 5.0
@@ -200,34 +186,13 @@
     base_frame: lbr_link_0
 
     filter:
-      # 0.9, 21 Oct 2026 (was 0.1): the yubi glove teleop's value (yubi deploy/teleop/gains/
-      # soft_k1300_r60_f09.yaml), as the default so a relaunch no longer reverts it. EMA weight on
-      # the PREVIOUS desired pose per 2 ms cycle: ramps a 30 Hz target step over ~20 ms.
+      # crisp's weight on the previous value: 0.9 ramps a step of the target over about 20 ms.
       target_pose: 0.9
       q: 0.2
       dq: 0.2
       q_ref: 0.2
       output_torque: 0.2
 
-    # Teleoperation gains, 16 Sep 2026. Raised from 500/20 because the arm lagged the
-    # operator's hand, and that sluggishness has a published number attached: Takagi et al.
-    # (arXiv 2605.07037) ran a human-in-the-loop stiffness sweep on two 7-DOF Frankas and
-    # found error rising sharply below 400 N/m, with degradation "evident for compliance
-    # values smaller than 600 N/m". 500 sat below that knee.
-    #
-    # crisp's variable_max_stiffness clamps at 900/60 by default (cartesian_controller.yaml:333,
-    # 339), silently and with only a throttled warning — so raising k_pos past 900 does nothing
-    # unless variable_max_stiffness is raised with it (below, after `nullspace`).
-    #
-    # Real-hardware precedent on this arm class: idra-lab/kuka_lbr_control runs 1000/30 on a
-    # real iiwa over FRI torque; arXiv 2509.19696 teleoperates an iiwa from hand tracking at
-    # 800 N/m / 150 Nm/rad; matthias-mayr reports up to 1000 N/m "very stable" on real iiwas.
-    #
-    # 1300 for excitation, 19 Sep 2026. Session 20260919-135802 (900 N/m, speed 1.0) aborted
-    # at 36%: A1 and A2 sat at dq=0 while the tip error grew to 40 mm, and J^T K e reproduced
-    # the logged tau_task (A1 5.4 vs 5.0 Nm) -- at that pose the lever along the error was
-    # 0.30 m (run median 0.52), so 36 N gave the shoulder ~5 Nm, under its breakaway. 1300
-    # breaks the same stall at ~28 mm instead of sitting at 40. Rotational gains unchanged.
     task:
       k_pos_x: 1300.0
       k_pos_y: 1300.0
@@ -236,37 +201,14 @@
       k_rot_y: 60.0
       k_rot_z: 60.0
 
-      # NOT the 2*sqrt(k) convention, and deliberately below what a free-oscillation
-      # analysis alone would ask for, because two measurements pull opposite ways.
-      #
-      # Identified Franka end-effector dynamics (4.21 kg apparent inertia, 10.73 Ns/m
-      # viscous) put zeta=1 at K=1000 near B=131, where the convention gives 63 — so
-      # 2*sqrt(k) under-damps by about 2x, and the failure mode is a ~2 Hz resonance that
-      # feels bouncy rather than instability. The iiwa14 is heavier, so the factor is worse.
-      #
-      # Against that: crisp damps against MEASURED end-effector velocity with the target
-      # velocity implicitly zero (cartesian_controller.cpp:172-174), so every Ns/m here
-      # fights the operator's hand directly. van den Brandt et al. (arXiv 2603.25418) hit
-      # exactly this on a Quest-driven Franka teleop and fixed it with velocity feedforward
-      # rather than with stiffness.
-      #
-      # 70 is the compromise. If it feels bouncy, raise toward 110; if it feels heavy, the
-      # real fix is feedforward in the controller, not a smaller number here.
-      #
-      # 84 = 70 * sqrt(1300/900): same damping ratio at the raised k_pos (19 Sep 2026).
       d_pos_x: 84.0
       d_pos_y: 84.0
       d_pos_z: 84.0
-      # 2*sqrt(60) = 15.5. The previous 13.4 was 2*sqrt(45) — critical for a k_rot of 45,
-      # inherited from a Panda profile, which left this bench at zeta 1.5 against its actual
-      # k_rot of 20: 50% overdamped, and a direct cause of laggy orientation.
       d_rot_x: 15.5
       d_rot_y: 15.5
       d_rot_z: 15.5
 
-      # 0.02 m / 0.05 rad per axis with limit_error true, 21 Oct 2026 (was 0.1 / 0.5, unused with
-      # limit_error false): the yubi glove teleop's backstop, error_clip x k = 26 N / 3 Nm. It also
-      # caps what any other tool:=none client can pull with (excitation, the Haply bridge).
+      # With limit_error true the task force is at most error_clip x k per axis: 26 N, 3 Nm.
       error_clip:
         x: 0.02
         y: 0.02
@@ -276,81 +218,32 @@
         rz: 0.05
 
     nullspace:
-      # 30, 19 Sep 2026 (was 5). At 5 Nm/rad the elbow was held by friction, not by this term:
-      # sessions 20260919-135802 and -141547 both drifted up to 30 deg off q_ref (A1 -20 /
-      # A3 +24) with |tau_nullspace| never above 2.5 Nm, against ~8 Nm A1 breakaway (7.9 Nm
-      # commanded, 0.07 Nm on the sensor, dq=0). Both reached the same wrong posture at sample
-      # ~50k, where the plan's +x needs mostly A1, and aborted at 40 mm -- at 900 and at 1300
-      # N/m alike. 30 gives 10.5 Nm at 20 deg, under the 14 Nm max_tau.
       stiffness: 30.0
-      # 2*sqrt(30) = 11. The dragging at the old 10.0 was zeta 2.24 against stiffness 5, not
-      # the damping's size; this is zeta 1.
       damping: 11.0
-      # Was 3.0, which could not do the job this term exists for. Measured from a bag of an
-      # autonomous excitation run (excite_02, 2026-09-16), peak per joint:
-      #
-      #     tau_task        9.7  11.2   6.8  11.2   5.6   9.7   8.1  Nm
-      #     tau_nullspace   1.5   1.0   1.9   0.0   2.7   0.4   1.6  Nm
-      #
-      # The nullspace term was outgunned roughly 5:1 by the task term, so the redundant degree
-      # of freedom was not controlled by anything: a commanded POSE does not pin the wrist, and
-      # with target_joint unable to hold it either, A7 wandered to -175.1 deg against a +/-175
-      # limit and tripped the hardware stop — while being commanded no further than -129.5.
-      #
-      # 10 Nm puts the achievable nullspace torque at ~14 Nm, above the 11.2 Nm peak task
-      # torque, so the term can actually hold the configuration it is given. Offline over 200
-      # sampled configurations this takes the fraction where gravity alone defeats the term
-      # from 48% to 0%, which is also what the excitation data needs: at 3 Nm the arm's
-      # configurations collapse onto a 6-D sheet inside a 7-D space.
-      #
-      # It is 5% of the 200 Nm joint effort limit. It DOES make the elbow noticeably stiffer to
-      # push by hand, which matters because this is the deployment controller too.
-      #
-      # 14 = 10 * 1300/900, 19 Sep 2026: the task term scaled with k_pos, so the 11.2 Nm peak
-      # above is ~16 Nm now, and this term keeps the same ratio to it.
       max_tau: 14.0
 
     joint_limit_repulsion:
       enabled: true
-      # Engage earlier: 0.15 rad is 8.6 deg of runway to stop a joint the task term is pushing.
       safe_range: 0.25
-      # Was 3.0, and in the same bag it sat pinned at exactly 3.00 Nm on A7 while the task term
-      # pushed with 8.11 Nm — saturated, losing, and the only thing standing between the plan
-      # and the stop. A guard capped below the force it has to resist is not a guard. 15 Nm
-      # clears the 11.2 Nm peak task torque with margin.
-      #
-      # 22, 19 Sep 2026: k_pos 900 -> 1300 scales that peak to ~16 Nm, which 15 would no longer
-      # clear. 22 keeps the same 1.34x margin.
       max_torque: 22.0
 
-    # Without this, crisp clamps k_pos to its 900 N/m default ceiling, silently.
+    # crisp clamps task.k_pos_* and task.k_rot_* to these.
     variable_max_stiffness:
       translational: 1300.0
       rotational: 60.0
 
     max_delta_tau: 2.0
-    limit_error: true  # 21 Oct 2026 (was false): task.error_clip above
+    limit_error: true
     limit_torques: true
     use_friction: false
-    # FRI torque commands are overlays on KUKA's joint-impedance controller.
-    # Do not duplicate the robot controller's model compensation here.
+    # FRI torque commands are overlays on Sunrise's joint impedance controller, which already
+    # compensates the robot's dynamics.
     use_coriolis_compensation: false
     use_gravity_compensation: false
     use_local_jacobian: true
 
-    # This controller publishes nothing — no reference, no error, no commanded torque — so
-    # introspection is the ONLY way to read what it is actually tracking. It registers
-    # error_0..5 (the task error that generates the torque), target_position_*/orientation_*,
-    # tau_task_*, tau_desired_*, q_target_* and q_ref_*, on
-    # /lbr/controller_manager/introspection_data/{names,values}.
-    #
-    # Needed because a learned free-space torque model is fed the command error, and the
-    # alternative — logging the target we publish ourselves — records a staircase at the
-    # teleop's publish rate rather than the reference the impedance law used, which an LSTM
-    # will happily memorise as a clock.
-    #
-    # It is read in on_configure (cartesian_controller.cpp:474), so setting the parameter on
-    # a configured controller does nothing: it takes effect on the next configure.
+    # The controller publishes nothing itself: its terms are read from
+    # /lbr/controller_manager/introspection_data. crisp reads this parameter in on_configure only.
     enable_introspection: true
 
 /**/joint_impedance_controller:
@@ -366,10 +259,6 @@
     end_effector_frame: lbr_link_ee
     base_frame: lbr_link_0
 
-    # Matches the Cartesian controller rather than inheriting CRISP's 0.5
-    # defaults. alpha weights the PREVIOUS value, so 0.2 keeps 20% of it: light
-    # smoothing, ~1.2 ms time constant at 500 Hz. Lag is what costs phase
-    # margin here, so filter no more than necessary.
     filter:
       q: 0.2
       dq: 0.2
@@ -377,8 +266,8 @@
       target_pose: 0.1
       output_torque: 0.2
 
-    # Zero task gains: this controller is pure joint-space impedance, so the
-    # Cartesian error and its clip play no part.
+    # Zero task gains and projector_type none: the nullspace term is the whole law, a joint
+    # impedance of stiffness x weight per joint (100, 100, 75, 75, 40, 25, 15 Nm/rad).
     task:
       k_pos_x: 0.0
       k_pos_y: 0.0
@@ -387,31 +276,7 @@
       k_rot_y: 0.0
       k_rot_z: 0.0
 
-    # With projector_type "none" the projector is the identity, so this block
-    # is the whole controller: tau = k*w*(q_ref - q) + d*w*(dq_ref - dq), with
-    # the same weight vector scaling both.
-    #
-    # Per-joint stiffness is stiffness * weight: 100, 100, 75, 75, 40, 25, 15 Nm/rad.
-    #
-    # Damping is set explicitly. Left at -1, CRISP computes 2*sqrt(k_j), which
-    # assumes an inertia of 1 kg m^2 at every joint. The iiwa14's proximal
-    # joints carry roughly 4-5 kg m^2 and its distal ones under 0.5, so the
-    # auto value under-damps A1-A4 by more than a factor of two. Critical
-    # damping is 2*sqrt(k_j * I_j), which for A1 at 20 Nm/rad and ~5 kg m^2 is
-    # about 45 at 100 Nm/rad rather than the 20 the formula gives.
-    #
-    # damping * weight = 40, 40, 30, 30, 16, 10, 6 N m s/rad, so the proximal
-    # joints land near critical (A1 zeta ~0.9) and the distal ones are
-    # deliberately overdamped. They carry little inertia and are where
-    # measurement noise is worst.
-    #
-    # 100 Nm/rad is half of Sunrise's 200 Nm/rad joint impedance underneath (was
-    # an order of magnitude below it at 20); not yet checked for series-compliance
-    # effects on hardware.
     nullspace:
-      # 5.0 x weights = 100/100/75/75/40/25/15 Nm/rad (was 1.0: 20 Nm/rad on A1, and the arm
-      # lagged the reference by 1.2-1.5 s and 20 deg at 0.3 rad/s -- friction, not the spring,
-      # set the motion; next shakedown, 22 Sep 2026). Damping 2.0 x weights.
       stiffness: 5.0
       damping: 2.0
       projector_type: none
@@ -430,12 +295,7 @@
       safe_range: 0.15
       max_torque: 3.0
 
-    # Per joint, per control cycle. At the 500 Hz update rate 2.0 is 1000 Nm/s.
-    # The old 0.2 was 100 Nm/s, and a rate limit that low delays a reversing
-    # damping torque by a large fraction of the oscillation period, which turns
-    # damping into a destabilising lag exactly when the error is large. That is
-    # what produced the overshoot-above-a-threshold behaviour in the Cartesian
-    # controller, and this controller had it five times worse.
+    # Nm per joint per control cycle.
     max_delta_tau: 2.0
     limit_error: false
     limit_torques: true
@@ -444,7 +304,4 @@
     use_gravity_compensation: false
     use_local_jacobian: true
 
-    # Same reasoning as the Cartesian entry above. Here q_ref IS the commanded joint
-    # reference (projector_type: none makes the nullspace term the whole law), so
-    # introspection is also what would make a joint-space command channel readable.
     enable_introspection: true

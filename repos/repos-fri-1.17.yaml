@@ -1,18 +1,22 @@
-# Local manifest for FRI 1.17, which lbr_fri_ros2_stack does not ship on jazzy.
-# Upstream provides repos-fri-{1.11,1.14,1.15,1.16,2.5,2.6,2.7}.yaml only, but
-# lbr-stack/fri carries an fri-1.17 branch with the matching client SDK.
-# Contents mirror upstream repos-fri-1.16.yaml with the fri branch bumped.
+# lbr_fri_ros2_stack ships no manifest for FRI 1.17 on jazzy; lbr-stack/fri has the client SDK
+# on its fri-1.17 branch.
 repositories:
+  lbr_fri_ros2_stack:
+    type: git
+    url: https://github.com/lbr-stack/lbr_fri_ros2_stack.git
+    version: dab3f7561e8a2cbefccd48b5edaf1a1663a8c6d9
+  crisp_controllers:
+    type: git
+    url: https://github.com/learnsyslab/crisp_controllers.git
+    version: 0279dc8f1196dab6a2b2cd5af853dd3d4dc3a969
   fri:
     type: git
     url: https://github.com/lbr-stack/fri
-    version: fri-1.17
+    version: 1f80137c0771fde6a6c4cdff4daa16aa5dc07eed
   lbr_fri_idl:
     type: git
     url: https://github.com/lbr-stack/lbr_fri_idl
-    version: fri-1
-
-  # robot descriptions (optionally only use yours)
+    version: e422bff2b3d70ec47853145b35645980df623a60
   lbr_iiwa7_r800_description:
     type: git
     url: https://github.com/lbr-stack/lbr_iiwa7_r800_description.git

@@ -575,7 +575,7 @@ TEST(PositionSourceIk, ActivationResetsEverything) {
   EXPECT_TRUE(bit_identical(source.q_out(), q2));
   EXPECT_TRUE(bit_identical(source.q_ik(), q2));
   EXPECT_TRUE(source.stale());
-  // The filtered target is gone: with no new target the first output is today's.
+  // The filtered target is gone: with no new target the output is the measured position.
   source.update(q2, kDt, nullptr);
   EXPECT_TRUE(bit_identical(source.q_out(), q2));
   EXPECT_TRUE(source.stale());

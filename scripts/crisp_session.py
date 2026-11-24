@@ -73,7 +73,7 @@ def main() -> int:
         "--home-file",
         type=Path,
         default=None,
-        help="home to this capture (scripts/capture_home.py) instead of HOME_DEGREES",
+        help="home to the joints in this JSON file instead of HOME_DEGREES",
     )
     parser.add_argument("--timeout", type=float, default=15.0)
     args = parser.parse_args()

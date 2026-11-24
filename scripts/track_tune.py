@@ -15,7 +15,7 @@ once per gains file, and scores each run against the same numbers:
 Why a lag exists at all: crisp damps against MEASURED velocity with the target's velocity
 taken as zero, so a target moving at v holds a steady-state error of (D/K) v behind it -- 65 ms
 at k_pos 1300 / d_pos 84. A gains file may set `replay: {lead: true}` to send each target
-(D/K) v ahead of itself (camera_gizmo.py's lead), which cancels that at constant speed, and
+(D/K) v ahead of itself, which cancels that at constant speed, and
 `replay: {max_error_m: 0.04}` to hold the target within that of the arm (crisp's
 max_ee_tracking_error, which a replay otherwise bypasses).
 

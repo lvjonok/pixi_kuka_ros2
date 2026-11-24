@@ -12,7 +12,6 @@ install/
 log/
 
 # Sources imported by scripts/import_sources.sh
-/external/
 /src/crisp_controllers/
 /src/fri/
 /src/lbr_fri_idl/
